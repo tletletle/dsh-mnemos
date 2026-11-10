@@ -7,14 +7,14 @@ DSH 的本地长期记忆插件：把对话里值得留下的东西写成记录�
 
 | 部分 | 状态 | 依据 |
 | --- | --- | --- |
-| 全部 355 个测试 | ✅ 全绿 | `node --test`（零运行时依赖，不需要 install） |
+| 全部 360 个测试 | ✅ 全绿 | `node --test`（零运行时依赖，不需要 install） |
 | 宿主进程内加载 | ✅ 已验证（本机 `desktop` profile 长期挂着跑；另有一次独立临时 profile 的复核） | `/.dsh-mnemos/panel` 返回 200 |
 | 浏览器内渲染 | ✅ 已验证（设置页「记忆星图」的真实 UI） | 概览 / 星图 / 说明三个页签；复核步骤见「在真实宿主里验一遍」 |
 | 人格同步（persona） | ✅ 已验证（对接 dsh-persona-dafeiyu，含相对路径解析与节流） | `/api/dsh-persona-dafeiyu/status` → 快照写入并原地更新 |
 | 情绪分量（强度 + 共振） | ✅ 已验证（没有 mood 时整份退出归一，老分值逐位不变） | 321 条老测试未改而全绿 |
 | 记忆星图 | ✅ 已验证（三维球壳 + 投影 + 预渲染贴图 + 未点亮空位） | 抽出绘制函数单独渲染截图核对 |
 | 向量通道（local / api） | ❌ **从未跑通过真实请求** | 全仓库没有代码设置 `globalThis.__dshMnemosOnnx`，只有 `vector.mjs` 在读 |
-| Windows 上的测试 | ✅ **已验证**（CI `node24-windows-latest` 全绿；本机 Windows 11 + Node 24.21 跑过 355/355） | 这一关抓到真 bug：Windows 上 `rename` 覆盖被占用的目标会抛 EPERM，已加退避 + 原地覆盖兜底 |
+| Windows 上的测试 | ✅ **已验证**（CI `node24-windows-latest` 全绿；另外贡献者 @HIHAHA501 在其 Windows 11 + Node 24.21 上跑过全部用例） | 这一关抓到真 bug：Windows 上 `rename` 覆盖被占用的目标会抛 EPERM，已加退避 + 原地覆盖兜底 |
 | Windows 上的桌面实装 | ✅ **已验证**（v0.1.2 + 宿主 0.2.1-rc.5，独立临时 profile，三个页签都出图） | 见「在真实宿主里验一遍（独立 profile）」 |
 | Node 22 | ✅ **已验证**（CI `node22-ubuntu` 全绿） | 曾经红过：一个 persona 超时用例赌了 `AbortSignal.timeout` 的 unref 定时器；改成注入 `AbortController` 后两个版本都绿 |
 
@@ -23,6 +23,15 @@ DSH 的本地长期记忆插件：把对话里值得留下的东西写成记录�
 - **真实环境验证过的**：宿主内加载、面板路由、浏览器内渲染、人格同步、星图绘制管线；Windows 上的测试与桌面实装。
 - **仅单测验证的**：核心层、检索层、宿主接线层的逻辑与降级路径，以及浏览器半边的纯函数。
 - **仍然没验证的**：向量通道的真实推理（local 与 api 都没发过一次请求）。
+
+## Contributors
+
+感谢每一位往里放东西的人。
+
+| | 贡献 |
+| --- | --- |
+| [@tletletle](https://github.com/tletletle) | 插件本体：分层记忆、检索、情绪分量、记忆星图、发布与 CI |
+| [@HIHAHA501](https://github.com/HIHAHA501) | [#1](https://github.com/tletletle/dsh-mnemos/pull/1)：修正 README 状态表的自相矛盾；37 处 POSIX 临时目录改为 `join(tmpdir(), …)` 并新增守卫用例；补「在真实宿主里用独立 profile 验一遍」的步骤 |
 
 ## 致谢
 
