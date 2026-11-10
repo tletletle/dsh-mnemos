@@ -41,12 +41,11 @@ const STARMAP = {
   R_MIN: 2,
   R_MAX: 18,
   SHELL: 0.42, // 球壳外半径 = 画布短边 × 0.42
-  PITCH: -0.18, // 固定俯仰角：没有它，yaw=0 时 XZ 大圆会退化成直线
+  PITCH: -0.05, // 极小的俯仰角：再大就会把 y 压扁，球看着不圆（横竖到球心要等距）
   ROLL: 0.22, // 固定小侧倾：没有它，yaw=0 时 YZ 大圆会退化成直线
   FOCUS_LEN: 4, // 透视焦距 = 球壳半径 × 4（旧投影用，保留给球壳分层）
-  FOCAL_RATIO: 3, // 真三维路径的焦距 = 球壳半径 × 3
+  FOCAL_RATIO: 6, // 真三维路径的焦距 = 球壳半径 × 6：越大透视越弱、越能把星铺满圆
   SPIN: 0.00006, // 自转角速度（rad/ms）
-  ASPECT_MAX: 1.6, // 屏幕横向最多拉开 1.6 倍，宽画布才不浪费
   ANCHOR_BASE: 40,
   ANCHOR_BONUS: 4, // 锚点星 40 + 4×权重 → 40~44
   CHAMPION: 1.6, // 每层权重最高的一颗（章首星）
@@ -1584,7 +1583,7 @@ function projectSphere(x, y, z, yaw, pitch, focusLen, w, hgt) {
  * 球面 -> 屏幕：绕 Y 轴转 yaw，再按焦距透视；横向乘画布宽高比，宽画布才不浪费。
  * 思路参考 dsh-plugin-memory-neurons (MIT)。
  */
-function projectStar(x, y, z, yaw, cx, cy, focal, aspect, camera) {
+function projectStar(x, y, z, yaw, cx, cy, focal, camera) {
   const cam = camera || STARMAP;
   const c = Math.cos(yaw);
   const s = Math.sin(yaw);
@@ -1593,14 +1592,15 @@ function projectStar(x, y, z, yaw, cx, cy, focal, aspect, camera) {
   const cp = Math.cos(cam.PITCH);
   const sp = Math.sin(cam.PITCH);
   const ry = y * cp - rz0 * sp;
-  const rz = y * sp + rz0 * cp;
-  const persp = focal / Math.max(1, focal + rz);
+  // 透视只按绕 Y 轴那一层的深度算：俯仰/侧倾是画面内的倾斜，掺进透视会让球变扁
+  const persp = focal / Math.max(1, focal + rz0);
   // 侧倾落在屏幕坐标上：只有俯仰的话，正对镜头的那条大圆会压成一条直线
   const ox = rx * persp;
   const oy = ry * persp;
   const cr = Math.cos(cam.ROLL);
   const sr = Math.sin(cam.ROLL);
-  return { x: cx + (ox * cr - oy * sr) * aspect, y: cy + ox * sr + oy * cr, z: rz, persp: persp };
+  // x 与 y 同一个倍率：球才是圆的，宽画布多出来的宽度就当留白
+  return { x: cx + (ox * cr - oy * sr), y: cy + ox * sr + oy * cr, z: rz0, persp: persp };
 }
 
 /**
@@ -1683,12 +1683,14 @@ function layoutUniverse(stars, rawLinks, width, height) {
     if (best >= 0) champion.add(best);
   }
 
-  // 球壳半径 = 短边 × SHELL，但绝不大到把最外层的星顶出画布。
-  // 1.06 是「焦距 = 3R 的透视下，球面上最高的一点能到屏幕 1.06R」的界。
-  const shellR = Math.min(Math.min(w, hgt) * STARMAP.SHELL, (hgt / 2 - STARMAP.PAD - 1) / 1.06);
+  // 轮廓正圆的半径：短边 × SHELL，且一定装得进画布（宽画布多出来的宽度就是留白）
+  const short = Math.min(w, hgt);
+  const circleR = Math.min(short * STARMAP.SHELL, short / 2 - STARMAP.PAD);
+  // 三维球壳的最大半径要打个折：透视会把近侧的星放大。焦距放宽到 6 倍后这个折扣可以很小，
+  // 0.95 倍能让星铺满圆（实测最外点 ~0.96r），又不会跑到圆外
+  const shellR = circleR * 0.95;
   const grow = shellR / shell;
-  const aspect = clampNum(w / hgt, 1, STARMAP.ASPECT_MAX);
-  const focal = shellR * STARMAP.FOCAL_RATIO;
+  const focal = circleR * STARMAP.FOCAL_RATIO;
   const sphere = [];
   const nodes = [];
   const depth = [];
@@ -1699,7 +1701,7 @@ function layoutUniverse(stars, rawLinks, width, height) {
     const s3x = dir.x * radius;
     const s3y = dir.y * radius;
     const s3z = dir.z * radius;
-    const at = projectStar(s3x, s3y, s3z, 0, w / 2, hgt / 2, focal, aspect, STARMAP);
+    const at = projectStar(s3x, s3y, s3z, 0, w / 2, hgt / 2, focal, STARMAP);
     // far: 0 在最前，1 在最后——这里烘焙的是 yaw=0 的那一帧，供无 sphere 的平面回退用
     const far = clampNum((at.z / shellR + 1) / 2, 0, 1);
     const keep = 1 - (1 - STARMAP.DEPTH_MIN) * far;
@@ -1738,11 +1740,11 @@ function layoutUniverse(stars, rawLinks, width, height) {
   for (let k = 0; k < extra.length; k += 1) {
     const item = extra[k];
     const dir = starmapDirection(item.id);
-    const dist = shellR * (1.15 + 0.15 * ((hash32(item.id + ":shell") % 100) / 100));
+    const dist = shellR * (0.92 + 0.08 * ((hash32(item.id + ":shell") % 100) / 100));
     const s3x = dir.x * dist;
     const s3y = dir.y * dist;
     const s3z = dir.z * dist;
-    const at = projectStar(s3x, s3y, s3z, 0, w / 2, hgt / 2, focal, aspect, STARMAP);
+    const at = projectStar(s3x, s3y, s3z, 0, w / 2, hgt / 2, focal, STARMAP);
     ids.push(item.id);
     unlitIds.push(item.id);
     sphere.push({ x: Math.round(s3x * 10) / 10, y: Math.round(s3y * 10) / 10, z: Math.round(s3z * 10) / 10 });
@@ -1757,7 +1759,7 @@ function layoutUniverse(stars, rawLinks, width, height) {
     });
     depth.push(Math.round(at.z * 10) / 10);
   }
-  return { nodes, ids, links, unlitIds, depth, anchor, sphere, shell: { cx: w / 2, cy: hgt / 2, r: Math.round(shellR * 10) / 10 } };
+  return { nodes, ids, links, unlitIds, depth, anchor, sphere, shell: { cx: w / 2, cy: hgt / 2, r: Math.round(circleR * 10) / 10 } };
 }
 
 /* @starmap-start */
@@ -1790,6 +1792,46 @@ function drawStarmapFrame(ctx, nodes, opts) {
   ctx.fillStyle = sky;
   ctx.fillRect(0, 0, width, height);
 
+  // 背景里的鲸：位置、远近、翻转都在外面算好，这里只做平移/翻转/缩放 + 一次 drawImage。
+  // 画在天空之后、星点与连线之前——它在背景里，星在前景。
+  const whaleArt = o.whaleSprite || null;
+  // 新形状是 {body, tail, pivot} 两张贴图；旧形状（单个 canvas）照旧整张画
+  const whaleSplit = whaleArt && whaleArt.body && whaleArt.tail && whaleArt.pivot && Number(whaleArt.body.width) > 0 ? whaleArt : null;
+  const whaleCanvas = whaleSplit ? whaleSplit.body : whaleArt && Number(whaleArt.width) > 0 ? whaleArt : null;
+  const whale = whaleCanvas && o.whale ? o.whale : null;
+  if (whale) {
+    const wAlpha = Math.min(1, Math.max(0, Number(whale.alpha) || 0.4));
+    const wScale = Number(whale.scale) > 0 ? Number(whale.scale) : 1;
+    const wag = Number.isFinite(Number(whale.wag)) ? Number(whale.wag) : 0;
+    const tilt = Number.isFinite(Number(whale.tilt)) ? Number(whale.tilt) : 0;
+    ctx.save();
+    ctx.translate(Number(whale.x) || 0, Number(whale.y) || 0);
+    if (whale.flip) ctx.scale(-1, 1);
+    if (wScale !== 1) ctx.scale(wScale, wScale);
+    ctx.rotate(tilt);
+    // 身后沿来路拉开一串极小的点：位置与半径只由序号定，不随机
+    ctx.fillStyle = "rgba(214,228,255,0.8)";
+    for (let b = 1; b <= 4; b += 1) {
+      ctx.globalAlpha = 0.18 - b * 0.02;
+      ctx.beginPath();
+      ctx.arc(-whaleCanvas.width * (0.06 + b * 0.12), whaleCanvas.height * 0.12 * (b % 2 === 0 ? 1 : -1), 0.6 + (b % 3) * 0.3, 0, turn);
+      ctx.fill();
+    }
+    ctx.globalAlpha = wAlpha;
+    ctx.drawImage(whaleCanvas, -whaleCanvas.width / 2, -whaleCanvas.height / 2, whaleCanvas.width, whaleCanvas.height);
+    if (whaleSplit) {
+      // 尾叶绕尾柄转——单一整张贴图做不到这个，所以拆成身体 + 尾巴两张
+      ctx.save();
+      ctx.translate(whaleSplit.pivot.x - whaleCanvas.width / 2, whaleSplit.pivot.y - whaleCanvas.height / 2);
+      ctx.rotate(wag);
+      // 尾叶画布的右端中点就是接尾柄的锚点
+      ctx.drawImage(whaleSplit.tail, -whaleSplit.tail.width + 1, -whaleSplit.tail.height / 2, whaleSplit.tail.width, whaleSplit.tail.height);
+      ctx.restore();
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
   const px = new Array(count);
   const py = new Array(count);
   const pr = new Array(count);
@@ -1798,44 +1840,52 @@ function drawStarmapFrame(ctx, nodes, opts) {
   let order = null;
 
   if (shell) {
-    // ── 三条大圆：先把「中间确实是个球壳」立起来。纯装饰：不算边、不参与命中。
-    // 跟着 yaw 一起转，否则球壳和星点会对不上。思路参考 dsh-plugin-memory-neurons (MIT)
-    const focal = shell.r * 3;
-    const aspect = Math.min(1.6, Math.max(1, width / height));
+    // ── 轮廓正圆：球体在任何旋转下都投成同一个圆，这就是「圆」的来源。
+    // 纯装饰：不算边、不参与命中。
+    // 必须与 layoutUniverse 里的焦距比例一致（那边是 6 倍）；段内不许引用外部常量，所以写字面量
+    const focal = shell.r * 6;
     const cosY = Math.cos(yaw);
     const sinY = Math.sin(yaw);
-    // 固定的小俯仰 + 小侧倾（与布局同一组数：-0.18 / 0.22）。
-    // 少了它们，yaw=0 时正对镜头的两条大圆会压成直线，看着像十字线而不是球壳。
-    const cosP = Math.cos(-0.18);
-    const sinP = Math.sin(-0.18);
+    // 固定的小俯仰 + 小侧倾（与布局同一组数：-0.05 / 0.22）。
+    // 俯仰越小球越圆；侧倾是画面内的旋转，不影响各向同性。
+    const cosP = Math.cos(-0.05);
+    const sinP = Math.sin(-0.05);
     const cosR = Math.cos(0.22);
     const sinR = Math.sin(0.22);
     ctx.strokeStyle = "#ffb454";
     ctx.globalAlpha = 0.16;
     ctx.lineWidth = 0.9;
     ctx.beginPath();
-    for (let plane = 0; plane < 3; plane += 1) {
-      for (let k = 0; k <= 96; k += 1) {
-        const a = (turn * k) / 96;
-        const co = Math.cos(a) * shell.r;
-        const si = Math.sin(a) * shell.r;
-        const wx = plane === 2 ? 0 : co;
-        const wy = plane === 0 ? si : plane === 1 ? 0 : co;
-        const wz = plane === 0 ? 0 : si;
-        const rx = wx * cosY + wz * sinY;
-        const rz0 = -wx * sinY + wz * cosY;
-        const ry = wy * cosP - rz0 * sinP;
-        const rz = wy * sinP + rz0 * cosP;
-        const persp = focal / Math.max(1, focal + rz);
-        const ox = rx * persp;
-        const oy = ry * persp;
-        const sx = shell.cx + (ox * cosR - oy * sinR) * aspect;
-        const sy = shell.cy + ox * sinR + oy * cosR;
-        if (k === 0) ctx.moveTo(sx, sy);
-        else ctx.lineTo(sx, sy);
-      }
+    ctx.arc(shell.cx, shell.cy, shell.r, 0, turn);
+    ctx.stroke();
+
+    // ── 赤道：一条投影后的椭圆，暗示自转。压在轮廓圆里，别露到圆外。
+    // 思路参考 dsh-plugin-memory-neurons (MIT)
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(shell.cx, shell.cy, Math.max(1, shell.r - 0.5), 0, turn);
+    ctx.clip();
+    ctx.strokeStyle = "#ffb454";
+    ctx.globalAlpha = 0.07;
+    ctx.lineWidth = 0.9;
+    ctx.beginPath();
+    for (let k = 0; k <= 96; k += 1) {
+      const a = (turn * k) / 96;
+      const wx = Math.cos(a) * shell.r * 0.94;
+      const wz = Math.sin(a) * shell.r * 0.94;
+      const rx = wx * cosY + wz * sinY;
+      const rz0 = -wx * sinY + wz * cosY;
+      const ry = 0 - rz0 * sinP;
+      const persp = focal / Math.max(1, focal + rz0);
+      const ox = rx * persp;
+      const oy = ry * persp;
+      const sx = shell.cx + (ox * cosR - oy * sinR);
+      const sy = shell.cy + ox * sinR + oy * cosR;
+      if (k === 0) ctx.moveTo(sx, sy);
+      else ctx.lineTo(sx, sy);
     }
     ctx.stroke();
+    ctx.restore();
     ctx.globalAlpha = 1;
 
     // ── 投影每颗星：屏幕坐标与深度；半径、亮度按这一帧的深度现场重算
@@ -1849,13 +1899,13 @@ function drawStarmapFrame(ctx, nodes, opts) {
       const rx = x3 * cosY + z3 * sinY;
       const rz0 = -x3 * sinY + z3 * cosY;
       const ry = y3 * cosP - rz0 * sinP;
-      const rz = y3 * sinP + rz0 * cosP;
-      const persp = focal / Math.max(1, focal + rz);
+      const persp = focal / Math.max(1, focal + rz0);
       const ox = rx * persp;
       const oy = ry * persp;
-      px[i] = shell.cx + (ox * cosR - oy * sinR) * aspect;
+      // x 与 y 同倍率：球才圆
+      px[i] = shell.cx + (ox * cosR - oy * sinR);
       py[i] = shell.cy + ox * sinR + oy * cosR;
-      pz[i] = rz;
+      pz[i] = rz0;
       order.push(i);
     }
     // 画家算法：远的先画，近的盖上去
@@ -2071,6 +2121,161 @@ function starmapStarAt(layout, canvas, event, width, height) {
     }
   }
   return best < 0 ? null : { id: layout.ids[best], index: best };
+}
+
+
+/**
+ * 鲸鱼时间表：第 index 趟的间隔/时长/方向/纵向位置/远近全部由 hash32 定。
+ * 不用随机数——同一份时间轴每次一致，同一时刻打开面板鲸就出现在同一处。
+ */
+function whaleCycle(index) {
+  const i = Math.max(0, Math.floor(Number(index) || 0));
+  // 走圆的上面还是下面：两条带，都不从星图正中穿过
+  const upper = hash32("whale:" + i + ":band") % 2 === 0;
+  const across = (hash32("whale:" + i + ":y") % 1001) / 1001;
+  return {
+    gap: 2000 + (hash32("whale:" + i + ":gap") % 11001), // 2~13 秒来一趟（加上 9~14 秒的穿越，平均 ~20 秒见到一次）
+    duration: 9000 + (hash32("whale:" + i + ":dur") % 5001), // 穿越 9~14 秒
+    dir: hash32("whale:" + i + ":dir") % 2 === 0 ? 1 : -1, // 1 左→右，-1 右→左
+    band: upper ? "upper" : "lower",
+    y: upper ? 0.15 + across * 0.15 : 0.7 + across * 0.15, // 上带 0.15~0.30h，下带 0.70~0.85h
+    scale: 0.8 + (hash32("whale:" + i + ":scale") % 301) / 1000, // 0.8~1.15 的远近
+  };
+}
+
+/**
+ * 第 index 趟从哪个时刻开场（毫秒，相对面板挂载）：
+ * 第一趟在挂载后 6~10 秒就来（没人会盯着一分钟等一条鲸），之后是「前一趟游完 + 这一趟的间隔」。
+ */
+function whaleBegin(index) {
+  const i = Math.max(0, Math.floor(Number(index) || 0));
+  let begin = 6000 + (hash32("whale:first") % 4001);
+  for (let k = 0; k < i; k += 1) begin += whaleCycle(k).duration + whaleCycle(k + 1).gap;
+  return begin;
+}
+
+/** 某一趟游到某个进度时的样子：横向穿过去，纵向轻轻起伏，远的更淡。 */
+function whaleAtMoment(cycle, progress, width, height) {
+  const t = clampNum(progress, 0, 1);
+  const dir = cycle.dir > 0 ? 1 : -1;
+  const x = dir > 0 ? -0.25 * width + t * 1.5 * width : 1.25 * width - t * 1.5 * width;
+  const y = cycle.y * height + Math.sin(t * Math.PI * 3) * 12;
+  // 摆尾相位按「这一趟已经游了多久」算：1.1 秒一个来回
+  const phase = (t * cycle.duration * Math.PI * 2) / 1100;
+  return {
+    x: Math.round(x * 10) / 10,
+    y: Math.round(y * 10) / 10,
+    scale: Math.round(cycle.scale * 100) / 100,
+    // 越远越淡，但仍要看得见：0.35~0.55
+    alpha: Math.round((0.35 + 0.2 * ((cycle.scale - 0.8) / 0.35)) * 100) / 100,
+    flip: dir < 0,
+    wag: Math.round(Math.sin(phase) * 0.28 * 1000) / 1000,
+    tilt: Math.round(Math.sin(phase * 0.5) * (1.5 * Math.PI / 180) * 10000) / 10000,
+  };
+}
+
+/**
+ * 预渲染一条鲸的剪影：大白头、流线身体、分叉尾鳍、小胸鳍、一只眼。
+ * 只造一次，画的时候平移/翻转/缩放进 drawImage，不抢星点的注意力。
+ * 拿不到 document 时返回 null，绘制端就不再画鲸。
+ * @param {number} size 贴图宽度像素。
+ * @returns {HTMLCanvasElement|null}
+ */
+function createWhaleSprite(size) {
+  // 做大：贴图默认 176 宽（比例 1:0.42 → 高 74），远看也是一条鲸不是一粒灰
+  const w = Math.round(clampNum(size === undefined ? 176 : size, 120, 512)) || 176;
+  const h = Math.round(w * 0.42);
+  const tailW = Math.round(w * 0.3);
+  try {
+    if (typeof document === "undefined" || !document || typeof document.createElement !== "function") return null;
+    const body = document.createElement("canvas");
+    body.width = w;
+    body.height = h;
+    const ctx = typeof body.getContext === "function" ? body.getContext("2d") : null;
+    if (!ctx) return null;
+    const X = (t) => t * w;
+    const Y = (t) => t * h;
+    // 两层同心的外发光，压在最底层
+    const glowA = ctx.createRadialGradient(X(0.56), Y(0.5), h * 0.08, X(0.56), Y(0.5), h * 0.62);
+    glowA.addColorStop(0, "rgba(212,226,255,0.10)");
+    glowA.addColorStop(1, "rgba(212,226,255,0)");
+    ctx.fillStyle = glowA;
+    ctx.fillRect(0, 0, w, h);
+    const glowB = ctx.createRadialGradient(X(0.52), Y(0.5), h * 0.03, X(0.52), Y(0.5), h * 0.98);
+    glowB.addColorStop(0, "rgba(190,206,244,0.06)");
+    glowB.addColorStop(1, "rgba(190,206,244,0)");
+    ctx.fillStyle = glowB;
+    ctx.fillRect(0, 0, w, h);
+
+    // 头 + 躯干：钝圆大头 -> 平缓低背 -> 收窄的尾柄（末端留出接尾叶的接头）
+    ctx.beginPath();
+    ctx.moveTo(X(0.97), Y(0.5));
+    ctx.bezierCurveTo(X(0.98), Y(0.28), X(0.9), Y(0.16), X(0.72), Y(0.16));
+    ctx.bezierCurveTo(X(0.6), Y(0.2), X(0.5), Y(0.24), X(0.42), Y(0.26));
+    ctx.bezierCurveTo(X(0.34), Y(0.3), X(0.28), Y(0.36), X(0.24), Y(0.42));
+    ctx.lineTo(X(0.24), Y(0.54));
+    ctx.bezierCurveTo(X(0.36), Y(0.62), X(0.5), Y(0.68), X(0.64), Y(0.66));
+    ctx.bezierCurveTo(X(0.82), Y(0.64), X(0.95), Y(0.6), X(0.97), Y(0.5));
+    ctx.closePath();
+    ctx.fillStyle = "rgba(255,255,255,0.08)";
+    ctx.fill();
+    ctx.lineJoin = "round";
+    ctx.lineWidth = Math.max(1.6, w * 0.019);
+    ctx.strokeStyle = "rgba(255,255,255,0.55)";
+    ctx.stroke();
+
+    // 胸鳍：靠前的一片扁长鳍，向后下方展开
+    ctx.beginPath();
+    ctx.moveTo(X(0.74), Y(0.64));
+    ctx.quadraticCurveTo(X(0.64), Y(0.86), X(0.5), Y(0.9));
+    ctx.quadraticCurveTo(X(0.58), Y(0.72), X(0.6), Y(0.63));
+    ctx.closePath();
+    ctx.fillStyle = "rgba(255,255,255,0.06)";
+    ctx.fill();
+    ctx.lineWidth = Math.max(1.2, w * 0.015);
+    ctx.strokeStyle = "rgba(255,255,255,0.45)";
+    ctx.stroke();
+
+    // 嘴：从吻端开始的下弯长曲线，拖到身体前 1/3
+    ctx.beginPath();
+    ctx.moveTo(X(0.97), Y(0.52));
+    ctx.quadraticCurveTo(X(0.88), Y(0.62), X(0.7), Y(0.58));
+    ctx.lineWidth = Math.max(1.2, w * 0.015);
+    ctx.strokeStyle = "rgba(255,255,255,0.5)";
+    ctx.stroke();
+
+    // 眼：1.5px 暗点，落在嘴角上方、靠头部前端
+    ctx.beginPath();
+    ctx.arc(X(0.86), Y(0.46), 1.5, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(30,26,44,0.6)";
+    ctx.fill();
+
+    // 尾叶单独一张：水平扇形、后缘带凹口，右端中点就是接尾柄的锚点
+    const tail = document.createElement("canvas");
+    tail.width = tailW;
+    tail.height = h;
+    const tctx = typeof tail.getContext === "function" ? tail.getContext("2d") : null;
+    if (!tctx) return null;
+    const TX = (t) => t * tailW;
+    tctx.beginPath();
+    tctx.moveTo(TX(1), Y(0.42));
+    tctx.quadraticCurveTo(TX(0.5), Y(0.16), TX(0.06), Y(0.2));
+    tctx.quadraticCurveTo(TX(0.46), Y(0.44), TX(0.34), Y(0.5));
+    tctx.quadraticCurveTo(TX(0.46), Y(0.56), TX(0.06), Y(0.8));
+    tctx.quadraticCurveTo(TX(0.5), Y(0.84), TX(1), Y(0.58));
+    tctx.closePath();
+    tctx.fillStyle = "rgba(255,255,255,0.08)";
+    tctx.fill();
+    tctx.lineJoin = "round";
+    tctx.lineWidth = Math.max(1.6, w * 0.019);
+    tctx.strokeStyle = "rgba(255,255,255,0.55)";
+    tctx.stroke();
+
+    // 支点在身体画布坐标里：尾柄收口处
+    return { body: body, tail: tail, pivot: { x: Math.round(w * 0.24 * 10) / 10, y: Math.round(h * 0.48 * 10) / 10 } };
+  } catch {
+    return null;
+  }
 }
 
 /** 选中那颗星的位置：停帧时也要能画出高亮圈；球壳在转，所以取最近一帧的屏幕坐标。 */
@@ -2520,6 +2725,25 @@ function register(ctx, React) {
         const layout = layoutUniverse(starmap.stars, starmap.links, width, height);
         // 贴图只造一次：每帧上千次 drawImage 比每次现建径向渐变便宜得多
         const sprite = createStarSprite(STARMAP.SPRITE);
+        // 鲸只造一次；它按「相对挂载的时刻」排班，和 rAF 的绝对时间戳解耦
+        const whaleSprite = createWhaleSprite();
+        let t0 = -1;
+        const elapsedOf = (time) => {
+          if (t0 < 0) t0 = time;
+          return Math.max(0, time - t0);
+        };
+        // 时间轴：找到当前这一趟（时间单调，从前往后扫很快）
+        const findWhale = (elapsed) => {
+          for (let i = 0; i < 720; i += 1) {
+            const begin = whaleBegin(i);
+            const cycle = whaleCycle(i);
+            if (elapsed < begin) return { frame: null, next: begin };
+            if (elapsed < begin + cycle.duration) {
+              return { frame: whaleAtMoment(cycle, (elapsed - begin) / cycle.duration, width, height), next: begin + cycle.duration };
+            }
+          }
+          return { frame: null, next: elapsed + 60000 };
+        };
         // 每帧的屏幕坐标写回布局：命中测试与高亮圈都拿它，球壳转起来也不会点错
         const screen = [];
         layout.screenPositions = screen;
@@ -2537,6 +2761,8 @@ function register(ctx, React) {
             shell: layout.shell,
             yaw: time * STARMAP.SPIN,
             out: screen,
+            whaleSprite: whaleSprite,
+            whale: findWhale(elapsedOf(time)).frame,
           });
           const ring = starmapPickedNode(layout, box.selected);
           if (!ring) return;
@@ -2551,6 +2777,7 @@ function register(ctx, React) {
         const still = prefersReducedMotion() || typeof requestAnimationFrame !== "function";
         let raf = 0;
         let idle = 0;
+        let whaleTimer = 0;
         const stop = () => {
           if (raf && typeof cancelAnimationFrame === "function") cancelAnimationFrame(raf);
           raf = 0;
@@ -2559,11 +2786,34 @@ function register(ctx, React) {
           paint(Number(stamp) || 0);
           raf = requestAnimationFrame(loop);
         };
+        // 停帧以后只留一个 timer 等到下一次鲸鱼开场；到点唤醒 rAF，游完再回去停
+        const armWhale = () => {
+          if (still) return;
+          if (whaleTimer) clearTimeout(whaleTimer);
+          const elapsed = elapsedOf(at);
+          const next = findWhale(elapsed).next;
+          whaleTimer = setTimeout(() => {
+            whaleTimer = 0;
+            wake();
+          }, Math.max(16, next - elapsed));
+        };
+        const goIdle = () => {
+          idle = 0;
+          // 鲸正在游就别停，等这一趟游完
+          if (findWhale(elapsedOf(at)).frame) {
+            idle = setTimeout(goIdle, 400);
+            return;
+          }
+          stop();
+          armWhale();
+        };
         // 空闲 10 秒停帧；之后动一下指针就重新起转——停止只是省 CPU，不是结束
         const wake = () => {
           if (still) return;
           if (idle) clearTimeout(idle);
-          idle = setTimeout(stop, STARMAP_IDLE_MS);
+          if (whaleTimer) clearTimeout(whaleTimer);
+          whaleTimer = 0;
+          idle = setTimeout(goIdle, STARMAP_IDLE_MS);
           if (!raf) raf = requestAnimationFrame(loop);
         };
         // 命中的是空位时，详情换一句话；命中真实星时，只把它和相连的星点亮（focus）
@@ -2612,6 +2862,9 @@ function register(ctx, React) {
         return () => {
           stop();
           if (idle) clearTimeout(idle);
+          // 卸载/切页时把等鲸鱼的那个 timer 也清掉，别留一个野定时器
+          if (whaleTimer) clearTimeout(whaleTimer);
+          whaleTimer = 0;
           if (typeof canvas.removeEventListener === "function") {
             canvas.removeEventListener("pointermove", onMove);
             canvas.removeEventListener("pointerdown", onPick);
@@ -2783,6 +3036,10 @@ layoutUniverse,
 normalizeUniverse,
 renderStarmapBody,
 createStarSprite,
+createWhaleSprite,
+whaleCycle,
+whaleBegin,
+whaleAtMoment,
 unlitCount,
 unlitStars,
 starmapIsUnlit,

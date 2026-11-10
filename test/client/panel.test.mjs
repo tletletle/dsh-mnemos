@@ -1105,7 +1105,9 @@ test("星图：空闲 10 秒停帧，reduced-motion 只画一帧", () => {
   const { STARMAP_IDLE_MS, prefersReducedMotion } = exports.__test;
   assert.equal(STARMAP_IDLE_MS, 10000);
   assert.ok(/STARMAP_IDLE_MS = 10000/.test(CLIENT_SRC), "常量要写死 10000，测试盯的就是它");
-  assert.ok(CLIENT_SRC.includes("setTimeout(stop, STARMAP_IDLE_MS)"), "停帧由这个 setTimeout 触发");
+  // 停帧仍然由 10 秒的 setTimeout 触发，只是中间多了一层 goIdle：鲸在游时先不熄屏
+  assert.ok(CLIENT_SRC.includes("setTimeout(goIdle, STARMAP_IDLE_MS)"), "停帧由这个 setTimeout 触发");
+  assert.ok(CLIENT_SRC.includes("const stop = () =>"), "goIdle 里仍然会 stop()");
   assert.ok(CLIENT_SRC.includes('listen("pointermove", onMove)'), "指针一有活动就要重新起转");
   assert.ok(CLIENT_SRC.includes("prefers-reduced-motion"), "reduced-motion 分支要在源码里点名");
 
@@ -1252,6 +1254,9 @@ test("星图：绘制段自包含——抽出来放进空上下文也能画", ()
     createLinearGradient: () => ({ addColorStop() {} }),
     createRadialGradient: () => ({ addColorStop() {} }),
     fillRect() { drawn.fills += 1; },
+    save() {},
+    restore() {},
+    clip() {},
     beginPath() {},
     moveTo() {},
     lineTo() {},
@@ -1288,6 +1293,9 @@ test("星图：给了贴图就走 drawImage，不再每帧现建渐变", () => {
       return { addColorStop() {} };
     },
     fillRect() {},
+    save() {},
+    restore() {},
+    clip() {},
     beginPath() {},
     arc() {},
     fill() {},
@@ -1321,6 +1329,9 @@ test("星图：时间是每颗星各自漂移（≤3px），不是把整张图�
       createLinearGradient: () => ({ addColorStop() {} }),
       createRadialGradient: () => ({ addColorStop() {} }),
       fillRect() {},
+      save() {},
+      restore() {},
+      clip() {},
       beginPath() {},
       arc() {},
       fill() {},
@@ -1372,6 +1383,9 @@ test("星图：聚焦一颗星时，只有它和相连的星保持亮度", () =>
       createLinearGradient: () => ({ addColorStop() {} }),
       createRadialGradient: () => ({ addColorStop() {} }),
       fillRect() {},
+      save() {},
+      restore() {},
+      clip() {},
       beginPath() {},
       arc() {},
       fill() {},
@@ -1416,6 +1430,9 @@ test("星图：没有贴图就回落渐变，三种残缺输入都不抛", () =>
     createLinearGradient: () => ({ addColorStop() {} }),
     createRadialGradient: () => ({ addColorStop() {} }),
     fillRect() {},
+    save() {},
+    restore() {},
+    clip() {},
     beginPath() {},
     arc() {},
     fill() {},
@@ -1512,6 +1529,9 @@ test("星图：指针真的停在空位上时，详情换成那句话，移开�
     createLinearGradient: () => ({ addColorStop() {} }),
     createRadialGradient: () => ({ addColorStop() {} }),
     fillRect() {},
+    save() {},
+    restore() {},
+    clip() {},
     beginPath() {},
     arc() {},
     fill() {},
@@ -1689,6 +1709,9 @@ function frameCtx(rec) {
     createLinearGradient: () => ({ addColorStop() {} }),
     createRadialGradient: () => ({ addColorStop() {} }),
     fillRect() {},
+    save() {},
+    restore() {},
+    clip() {},
     beginPath() {},
     moveTo() {},
     lineTo() {},
@@ -1788,6 +1811,9 @@ test("星图：深度单调——越远的星越小越暗，且远的先画", ()
     createLinearGradient: () => ({ addColorStop() {} }),
     createRadialGradient: () => ({ addColorStop() {} }),
     fillRect() {},
+    save() {},
+    restore() {},
+    clip() {},
     beginPath() {},
     moveTo() {},
     lineTo() {},
@@ -1832,6 +1858,80 @@ test("星图：深度单调——越远的星越小越暗，且远的先画", ()
   }
 });
 
+test("星图：投影各向同性——球面横竖两个方向到球心一样远", () => {
+  const slice = starmapSlice();
+  const shell = { cx: 260, cy: 150, r: 120 };
+  const nodes = [
+    { x: 0, y: 0, r: 5, hue: 190, sat: 30, alpha: 0.8, phase: 0 },
+    { x: 0, y: 0, r: 5, hue: 190, sat: 30, alpha: 0.8, phase: 0 },
+  ];
+  // 同一个球面上，一个在 x 轴、一个在 y 轴
+  const sphere = [{ x: 60, y: 0, z: 0 }, { x: 0, y: 60, z: 0 }];
+  const out = [];
+  const { ctx } = frameCtx();
+  const opts = { time: 0, links: [], width: 520, height: 300, yaw: 0, out, sphere, shell };
+  vm.runInNewContext(slice + ";drawStarmapFrame(ctx, nodes, opts);", { ctx, nodes, opts, Math, Set, Map });
+  const d0 = Math.hypot(out[0].x - shell.cx, out[0].y - shell.cy);
+  const d1 = Math.hypot(out[1].x - shell.cx, out[1].y - shell.cy);
+  assert.ok(Math.abs(d0 - d1) < 0.5, "横竖要一样远（球才是圆的）：" + d0.toFixed(2) + " vs " + d1.toFixed(2));
+});
+
+test("星图：球壳轮廓是一个正圆，赤道另算，线框总共只描两次", () => {
+  const slice = starmapSlice();
+  const arcs = [];
+  let strokes = 0;
+  const ctx = {
+    createLinearGradient: () => ({ addColorStop() {} }),
+    createRadialGradient: () => ({ addColorStop() {} }),
+    fillRect() {},
+    beginPath() {},
+    moveTo() {},
+    lineTo() {},
+    arc(x, y, r, from, to) { arcs.push({ x, y, r, from, to }); },
+    fill() {},
+    stroke() { strokes += 1; },
+    save() {},
+    restore() {},
+    clip() {},
+    set fillStyle(v) {},
+    set strokeStyle(v) {},
+    set globalAlpha(v) {},
+    lineWidth: 1,
+  };
+  const shell = { cx: 260, cy: 150, r: 118 };
+  const nodes = [{ x: 0, y: 0, r: 1.5, hue: 218, sat: 11, alpha: 0.24, phase: 0 }];
+  const sphere = [{ x: 90, y: 20, z: 30 }];
+  const out = [];
+  const opts = { time: 0, links: [], width: 520, height: 300, yaw: 0.4, out, sphere, shell };
+  vm.runInNewContext(slice + ";drawStarmapFrame(ctx, nodes, opts);", { ctx, nodes, opts, Math, Set, Map });
+
+  const ring = arcs.filter((a) => Math.abs(a.r - shell.r) < 1e-6);
+  assert.equal(ring.length, 1, "轮廓只该有那一个正圆，实测 " + ring.length);
+  assert.equal(ring[0].x, shell.cx);
+  assert.equal(ring[0].y, shell.cy);
+  assert.equal(ring[0].from, 0, "起角要是 0");
+  assert.ok(Math.abs(ring[0].to - Math.PI * 2) < 1e-9, "止角要是 2π");
+  assert.equal(strokes, 2, "线框只有两条：轮廓正圆 + 赤道椭圆，实测 " + strokes);
+});
+
+test("星图：星点与空位都不许跑到轮廓圆外", () => {
+  const { layout } = shellLayout();
+  assert.ok(layout.shell.r > 40, "轮廓半径要有点分量：" + layout.shell.r);
+  for (const yaw of [0, 0.6, 1.3, 2.4, 4.1]) {
+    const out = frameOut(layout, yaw);
+    assert.equal(out.length, layout.nodes.length);
+    for (let i = 0; i < out.length; i += 1) {
+      const d = Math.hypot(out[i].x - layout.shell.cx, out[i].y - layout.shell.cy);
+      assert.ok(d <= layout.shell.r + 1, "第 " + i + " 颗在 yaw=" + yaw + " 时溢出轮廓：" + d.toFixed(2) + " > " + layout.shell.r);
+    }
+    // 三维模长也要在主壳之内
+    for (const p of layout.sphere) {
+      const len = Math.sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+      assert.ok(len <= layout.shell.r + 1, "三维半径超了：" + len.toFixed(2));
+    }
+  }
+});
+
 test("星图：20 条边只描 3~4 次，不再逐边 stroke", () => {
   const slice = starmapSlice();
   const nodes = [];
@@ -1870,6 +1970,189 @@ test("星图：命中跟着旋转走——转过去以后在新位置还能点�
   assert.equal(hit1.index, target, "旋转后不能错位");
   const stale = starmapStarAt(layout, canvas, { clientX: at0[target].x, clientY: at0[target].y }, 520, 300);
   assert.ok(!stale || stale.index !== target, "旧位置不该再命中同一颗");
+});
+
+test("星图：鲸鱼的时间表是确定的，参数落在约定范围里", () => {
+  const { whaleCycle, whaleBegin } = loadClient().exports.__test;
+  const a = whaleCycle(3);
+  const b = whaleCycle(3);
+  assert.equal(JSON.stringify(a), JSON.stringify(b), "同一个 cycleIndex 必须算出同一个样子");
+  const c = whaleCycle(4);
+  assert.ok(c.gap !== a.gap || c.dir !== a.dir || c.y !== a.y || c.scale !== a.scale, "换一趟至少要换一个参数");
+
+  const bands = { upper: 0, lower: 0 };
+  for (let i = 0; i < 200; i += 1) {
+    const w = whaleCycle(i);
+    assert.ok(w.gap >= 2000 && w.gap <= 13000, "间隔要在 2~13 秒：" + w.gap);
+    assert.ok(w.duration >= 9000 && w.duration <= 14000, "穿越要在 9~14 秒：" + w.duration);
+    // 纵向只走圆的上下两条带，不再正面穿过星图
+    const upper = w.y >= 0.15 && w.y <= 0.3;
+    const lower = w.y >= 0.7 && w.y <= 0.85;
+    assert.ok(upper || lower, "纵向只许落在上带 [0.15,0.30] 或下带 [0.70,0.85]：" + w.y);
+    bands[upper ? "upper" : "lower"] += 1;
+    assert.equal(w.band, upper ? "upper" : "lower");
+    assert.ok(w.scale >= 0.8 && w.scale <= 1.15, "远近 0.8~1.15：" + w.scale);
+    assert.ok(w.dir === 1 || w.dir === -1);
+  }
+  assert.ok(bands.upper > 20 && bands.lower > 20, "两条带都要走到：" + JSON.stringify(bands));
+  // 第一趟挂载后 6~10 秒就来，不然没人等得到
+  const first = whaleBegin(0);
+  assert.ok(first >= 6000 && first <= 10000, "第一趟要在 6~10 秒：" + first);
+  // 一趟游完之后下一趟才开场，相邻两趟的间隔就是下一趟的 gap
+  for (let i = 0; i < 20; i += 1) {
+    const end = whaleBegin(i) + whaleCycle(i).duration;
+    const gap = whaleBegin(i + 1) - end;
+    assert.ok(gap >= 2000 && gap <= 13000, "第 " + i + " 趟之后的间隔要在 2~13 秒：" + gap);
+  }
+});
+
+test("星图：鲸从画外游到另一边，翻转与远近跟着抽签走", () => {
+  const { whaleAtMoment } = loadClient().exports.__test;
+  const cyc = { gap: 50000, duration: 11000, dir: 1, band: "upper", y: 0.2, scale: 0.8 };
+  const start = whaleAtMoment(cyc, 0, 520, 300);
+  const end = whaleAtMoment(cyc, 1, 520, 300);
+  assert.ok(start.x < 0, "左→右时从画外左侧进场：" + start.x);
+  assert.ok(end.x > 520, "从左画到画外右侧：" + end.x);
+  assert.equal(start.flip, false, "朝右游不翻转");
+  assert.equal(whaleAtMoment(Object.assign({}, cyc, { dir: -1 }), 0.5, 520, 300).flip, true, "朝左游要水平翻转");
+  assert.ok(start.alpha >= 0.35 && start.alpha <= 0.55, "透明度 0.35~0.55：" + start.alpha);
+  assert.ok(Math.abs(start.y - 0.2 * 300) < 14, "纵向落在抽到的 0.2h 附近：" + start.y);
+  const far = whaleAtMoment(cyc, 0.4, 520, 300);
+  const near = whaleAtMoment(Object.assign({}, cyc, { scale: 1.15 }), 0.4, 520, 300);
+  assert.ok(far.alpha < near.alpha, "远的更淡");
+  assert.ok(near.alpha <= 0.55, "最近也才 0.55：" + near.alpha);
+  // 摆尾：幅度不超 0.28 rad，而且同一趟里确实在动
+  const w1 = whaleAtMoment(cyc, 0.07, 520, 300).wag;
+  const w2 = whaleAtMoment(cyc, 0.13, 520, 300).wag;
+  assert.ok(Math.abs(w1) <= 0.28 && Math.abs(w2) <= 0.28, "摆角要在 ±0.28 rad：" + w1 + " / " + w2);
+  assert.ok(Math.abs(w1 - w2) > 1e-6, "同一趟里两个进度取到的摆角必须不同：" + w1 + " vs " + w2);
+});
+
+test("星图：没有 whale 就不画鲸，画了也只在星点之前", () => {
+  const slice = starmapSlice();
+  const bodyArt = { width: 176, height: 74 };
+  const tailArt = { width: 53, height: 74 };
+  const whaleSprite = { body: bodyArt, tail: tailArt, pivot: { x: 42, y: 36 } };
+  const sprite = { width: 64, height: 64 };
+  const shoot = (extra) => {
+    const calls = [];
+    const ctx = {
+      createLinearGradient: () => ({ addColorStop() {} }),
+      createRadialGradient: () => ({ addColorStop() {} }),
+      fillRect() {},
+      save() {},
+      restore() {},
+      clip() {},
+      translate() {},
+      scale() {},
+      rotate() { calls.push("rotate"); },
+      beginPath() {},
+      moveTo() {},
+      lineTo() {},
+      arc() {},
+      fill() {},
+      stroke() {},
+      drawImage(img) {
+        if (img === bodyArt) calls.push("whale");
+        else if (img === tailArt) calls.push("tail");
+        else calls.push("star");
+      },
+      set fillStyle(v) {},
+      set strokeStyle(v) {},
+      set globalAlpha(v) {},
+      lineWidth: 1,
+    };
+    const nodes = [
+      { x: 60, y: 70, r: 6, hue: 190, sat: 40, alpha: 0.8, phase: 0 },
+      { x: 160, y: 90, r: 8, hue: 28, sat: 50, alpha: 0.7, phase: 1 },
+    ];
+    const sphere = [{ x: 40, y: 10, z: 30 }, { x: 10, y: 40, z: -20 }];
+    const shell = { cx: 260, cy: 150, r: 118 };
+    const opts = Object.assign({ time: 0, links: [[0, 1]], width: 520, height: 300, sprite: sprite, sphere: sphere, shell: shell, focus: -1, whaleSprite: whaleSprite }, extra || {});
+    vm.runInNewContext(slice + ";drawStarmapFrame(ctx, nodes, opts);", { ctx, nodes, opts, Math, Set, Map });
+    return calls;
+  };
+  const plain = shoot({ whale: null });
+  const missing = shoot({});
+  const swimming = shoot({ whale: { x: 200, y: 120, scale: 1, alpha: 0.45, flip: false, wag: 0.2, tilt: 0.01 } });
+  assert.equal(plain.filter((c) => c === "whale").length, 0, "whale=null 时一颗鲸都不该画");
+  assert.equal(missing.length, plain.length, "没给 whale 与给了 null 的落笔次数要一致");
+
+  const bodyAt = swimming.indexOf("whale");
+  const tailAt = swimming.indexOf("tail");
+  const firstStar = swimming.indexOf("star");
+  const rotatedAfterBody = swimming.findIndex((c, k) => c === "rotate" && k > bodyAt);
+  assert.ok(bodyAt >= 0 && bodyAt < firstStar, "鲸的身体必须在所有星点之前落笔（它在背景层）");
+  assert.ok(tailAt > bodyAt, "尾叶画在身体之后");
+  assert.ok(tailAt < firstStar, "尾叶也在星点之前");
+  assert.ok(rotatedAfterBody > bodyAt && rotatedAfterBody < firstStar, "尾叶的旋转在画完身体之后、星点之前");
+  assert.equal(swimming.filter((c) => c === "star").length, 2, "两颗真实星照旧各画一次");
+});
+test("星图：老形状（单个 canvas）也能画，不抛错且只落一笔", () => {
+  const slice = starmapSlice();
+  const legacy = { width: 96, height: 40 };
+  const calls = [];
+  const ctx = {
+    createLinearGradient: () => ({ addColorStop() {} }),
+    createRadialGradient: () => ({ addColorStop() {} }),
+    fillRect() {},
+    save() {},
+    restore() {},
+    clip() {},
+    translate() {},
+    scale() {},
+    rotate() { calls.push("rotate"); },
+    beginPath() {},
+    moveTo() {},
+    lineTo() {},
+    arc() {},
+    fill() {},
+    stroke() {},
+    drawImage(img) { calls.push(img === legacy ? "legacy" : "other"); },
+    set fillStyle(v) {},
+    set strokeStyle(v) {},
+    set globalAlpha(v) {},
+    lineWidth: 1,
+  };
+  const nodes = [{ x: 40, y: 40, r: 1.5, hue: 218, sat: 11, alpha: 0.24, phase: 0 }];
+  const opts = { time: 0, links: [], width: 520, height: 300, whaleSprite: legacy, whale: { x: 120, y: 60, scale: 1, alpha: 0.4, flip: true, wag: 0.2, tilt: 0 } };
+  assert.doesNotThrow(() => vm.runInNewContext(slice + ";drawStarmapFrame(ctx, nodes, opts);", { ctx, nodes, opts, Math, Set, Map }));
+  assert.equal(calls.filter((c) => c === "legacy").length, 1, "旧形状整张画一次");
+});
+test("星图：createWhaleSprite 造得出贴图，没有 document 时返回 null", () => {
+  const makeCanvas = () => ({
+    width: 0,
+    height: 0,
+    getContext: () => ({
+      createLinearGradient: () => ({ addColorStop() {} }),
+      createRadialGradient: () => ({ addColorStop() {} }),
+      fillRect() {},
+      beginPath() {},
+      moveTo() {},
+      lineTo() {},
+      bezierCurveTo() {},
+      quadraticCurveTo() {},
+      closePath() {},
+      fill() {},
+      stroke() {},
+      arc() {},
+      lineJoin: "round",
+      lineWidth: 1,
+      set fillStyle(v) {},
+      set strokeStyle(v) {},
+    }),
+  });
+  const withDoc = loadClient({ extra: { document: { baseURI: "http://127.0.0.1:52603/", createElement: makeCanvas } } });
+  const whale = withDoc.exports.__test.createWhaleSprite();
+  assert.ok(whale && whale.body && whale.tail && whale.pivot, "要返回 {body, tail, pivot}");
+  assert.equal(whale.body.width, 176, "默认身体贴图宽 176");
+  assert.equal(whale.body.height, Math.round(176 * 0.42), "身长:身高 = 1:0.42");
+  assert.ok(whale.tail.width > 0 && whale.tail.height > 0, "尾叶是另一张画布");
+  assert.ok(whale.pivot.x > 0 && whale.pivot.x < whale.body.width, "支点 x 要在身体画布内：" + whale.pivot.x);
+  assert.ok(whale.pivot.y > 0 && whale.pivot.y < whale.body.height, "支点 y 也要在画布内：" + whale.pivot.y);
+  const bigger = withDoc.exports.__test.createWhaleSprite(220);
+  assert.equal(bigger.body.width, 220);
+  assert.equal(loadClient().exports.__test.createWhaleSprite(), null, "没有 document 就返回 null，不抛");
 });
 
 test("星图：createStarSprite 用离屏画布造贴图，没有 document 时返回 null", () => {
