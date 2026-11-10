@@ -1682,6 +1682,196 @@ test("星图：失败后按重试会重新问一次，并且落到 ready", async
   assert.equal(calls.filter((c) => c.body && c.body.action === "universe").length, 2, "失败一次 + 重试一次");
 });
 
+/** 记录调用的假 ctx：够画一帧，顺手数 stroke/arc 次数。 */
+function frameCtx(rec) {
+  const r = rec || { strokes: 0, arcs: 0 };
+  const ctx = {
+    createLinearGradient: () => ({ addColorStop() {} }),
+    createRadialGradient: () => ({ addColorStop() {} }),
+    fillRect() {},
+    beginPath() {},
+    moveTo() {},
+    lineTo() {},
+    arc() { r.arcs += 1; },
+    fill() {},
+    stroke() { r.strokes += 1; },
+    drawImage() {},
+    set fillStyle(v) {},
+    set strokeStyle(v) {},
+    set globalAlpha(v) {},
+    lineWidth: 1,
+  };
+  return { ctx, rec: r };
+}
+
+/** 画一帧并把本帧的屏幕坐标读回来。 */
+function frameOut(layout, yaw, extra) {
+  const slice = starmapSlice();
+  const out = [];
+  const { ctx } = frameCtx();
+  const opts = Object.assign({ time: 0, links: [], width: 520, height: 300, yaw, out, sphere: layout.sphere, shell: layout.shell }, extra || {});
+  vm.runInNewContext(slice + ";drawStarmapFrame(ctx, nodes, opts);", { ctx, nodes: layout.nodes, opts, Math, Set, Map });
+  return out;
+}
+
+function shellLayout() {
+  const { layoutUniverse } = loadClient().exports.__test;
+  const stars = [];
+  for (let i = 0; i < 12; i += 1) {
+    // 每颗星各占一层：章首星的 ×1.6 就成了统一倍率，r 才是深度的纯函数
+    stars.push({ id: "r" + i, tier: "band" + i, text: "一样长的正文", weight: 0.5, pinned: i === 0, valence: 0, arousal: 0.6, at: i });
+  }
+  const links = stars.slice(1).map((s, i) => [stars[i].id, s.id]);
+  return { layout: layoutUniverse(stars, links, 520, 300), stars, links };
+}
+
+test("星图：三维球壳——sphere 与 nodes 同序同长，每项都有 x/y/z", () => {
+  const { layout } = shellLayout();
+  assert.equal(layout.sphere.length, layout.nodes.length, "sphere 必须与 nodes 同长");
+  for (const p of layout.sphere) {
+    for (const key of ["x", "y", "z"]) assert.ok(Number.isFinite(p[key]), "缺 " + key + "：" + JSON.stringify(p));
+  }
+  assert.ok(layout.shell && Number(layout.shell.r) > 0, "要给主壳半径");
+  assert.ok(Math.abs(layout.shell.cx - 260) < 0.2 && Math.abs(layout.shell.cy - 150) < 0.2, "球心在画布中心");
+  // 三维坐标的量级：最外的星半径要接近主壳
+  const far = Math.max.apply(null, layout.sphere.map((p) => Math.sqrt(p.x * p.x + p.y * p.y + p.z * p.z)));
+  assert.ok(far > layout.shell.r * 0.6, "球壳要铺开，实测最大半径 " + far.toFixed(1));
+});
+
+test("星图：真三维旋转——离自转轴越远转得越多，轴线附近几乎不动", () => {
+  const { layout } = shellLayout();
+  const a = frameOut(layout, 0);
+  const b = frameOut(layout, 1.2);
+  assert.equal(a.length, layout.nodes.length, "每一帧都要回写屏幕坐标");
+
+  const axis = layout.sphere.map((p) => Math.sqrt(p.x * p.x + p.z * p.z));
+  const move = layout.sphere.map((_, i) => Math.hypot(b[i].x - a[i].x, b[i].y - a[i].y));
+
+  // 与「到 Y 轴的距离」做皮尔逊相关：整图刚性旋转时这个相关会崩到 0 附近（所有点按到画面中心的距离等比移动）
+  const n = axis.length;
+  const mAxis = axis.reduce((s, v) => s + v, 0) / n;
+  const mMove = move.reduce((s, v) => s + v, 0) / n;
+  let cov = 0;
+  let varA = 0;
+  let varM = 0;
+  for (let i = 0; i < n; i += 1) {
+    cov += (axis[i] - mAxis) * (move[i] - mMove);
+    varA += (axis[i] - mAxis) * (axis[i] - mAxis);
+    varM += (move[i] - mMove) * (move[i] - mMove);
+  }
+  const corr = cov / Math.sqrt(varA * varM);
+  assert.ok(corr > 0.5, "位移要随离轴距离增长（真三维），实测相关 " + corr.toFixed(2));
+
+  // 分档比更抗透视放大带来的噪声：最靠轴的三分之一 明显比 最靠边的三分之一 动得少
+  const order = axis.map((_, i) => i).sort((x, y) => axis[x] - axis[y]);
+  const third = Math.max(1, Math.floor(order.length / 3));
+  const avg = (from, to) => {
+    let sum = 0;
+    for (let i = from; i < to; i += 1) sum += move[order[i]];
+    return sum / Math.max(1, to - from);
+  };
+  const nearAvg = avg(0, third);
+  const farAvg = avg(order.length - third, order.length);
+  assert.ok(nearAvg * 2.5 < farAvg, "最靠轴的三分之一应当动得更少：" + nearAvg.toFixed(1) + " vs " + farAvg.toFixed(1));
+
+  // 锚点星在球心（离轴 0），真三维旋转下它一步都不该动——整图刚性旋转做不到这一点
+  const axisMin = order[0];
+  assert.ok(axis[axisMin] < 5, "样本里要有一颗贴着自转轴：" + axis[axisMin].toFixed(1));
+  assert.ok(move[axisMin] < 2, "贴着自转轴的星几乎不动，实测 " + move[axisMin].toFixed(2) + "px");
+});
+
+test("星图：深度单调——越远的星越小越暗，且远的先画", () => {
+  const { layout, stars } = shellLayout();
+  const slice = starmapSlice();
+  const drawn = [];
+  const ctx = {
+    createLinearGradient: () => ({ addColorStop() {} }),
+    createRadialGradient: () => ({ addColorStop() {} }),
+    fillRect() {},
+    beginPath() {},
+    moveTo() {},
+    lineTo() {},
+    arc() {},
+    fill() {},
+    stroke() {},
+    drawImage(sprite, x, y, w, h) {
+      drawn.push({ x: x + w / 2, y: y + h / 2 });
+    },
+    set fillStyle(v) {},
+    set strokeStyle(v) {},
+    set globalAlpha(v) {},
+    lineWidth: 1,
+  };
+  const out = [];
+  const opts = { time: 0, links: [], width: 520, height: 300, yaw: 0.7, out, sphere: layout.sphere, shell: layout.shell, sprite: { width: 64, height: 64 } };
+  vm.runInNewContext(slice + ";drawStarmapFrame(ctx, nodes, opts);", { ctx, nodes: layout.nodes, opts, Math, Set, Map });
+
+  // 只认真实星，且排掉锚点星：核心星半径固定 40~44，本来就不跟深度走
+  // 空位也不吃深度（固定 1.2~2.2 的半径、0.20~0.30 的透明度）
+  const real = stars.map((_, i) => i).filter((i) => i !== layout.anchor);
+  const idx = real.slice().sort((x, y) => out[x].depth - out[y].depth);
+  for (let k = 1; k < idx.length; k += 1) {
+    const near = out[idx[k - 1]];
+    const far = out[idx[k]];
+    assert.ok(far.r <= near.r + 1e-9, "越远越小：" + near.r.toFixed(2) + " -> " + far.r.toFixed(2));
+    assert.ok(far.alpha <= near.alpha + 1e-9, "越远越暗：" + near.alpha.toFixed(3) + " -> " + far.alpha.toFixed(3));
+  }
+  assert.ok(out[idx[0]].r / out[idx[idx.length - 1]].r > 1.2, "深度要拉开大小差");
+  assert.ok(out[idx[0]].alpha > out[idx[idx.length - 1]].alpha, "深度要拉开明暗差");
+
+  // 画家算法：有贴图的真实星按远到近的顺序落笔
+  assert.equal(drawn.length, real.length + 1, "每颗真实星（含锚点）画一次贴图，空位不画贴图");
+  const depthAt = drawn.map((pt) => {
+    for (const i of stars.map((_, n) => n)) {
+      if (Math.abs(out[i].x - pt.x) < 0.01 && Math.abs(out[i].y - pt.y) < 0.01) return out[i].depth;
+    }
+    return null;
+  });
+  for (let k = 1; k < depthAt.length; k += 1) {
+    assert.ok(depthAt[k] !== null && depthAt[k] <= depthAt[k - 1] + 1e-6, "远处的先画，第 " + k + " 笔顺序反了");
+  }
+});
+
+test("星图：20 条边只描 3~4 次，不再逐边 stroke", () => {
+  const slice = starmapSlice();
+  const nodes = [];
+  for (let i = 0; i < 8; i += 1) nodes.push({ x: 40 + i * 55, y: 60 + (i % 3) * 70, r: 5, hue: 190, sat: 40, alpha: 0.8, phase: i });
+  const links = [];
+  for (let i = 0; i < 20; i += 1) links.push([i % 8, (i * 3 + 1) % 8]);
+  const { ctx, rec } = frameCtx();
+  const opts = { time: 0, links, width: 520, height: 300, focus: -1 };
+  vm.runInNewContext(slice + ";drawStarmapFrame(ctx, nodes, opts);", { ctx, nodes, opts, Math, Set, Map });
+  assert.ok(rec.strokes <= 4, "20 条边最多 3 桶 + 1 高亮批，实测 stroke() 调了 " + rec.strokes + " 次");
+  assert.ok(rec.strokes >= 1, "边还是要画的");
+});
+
+test("星图：命中跟着旋转走——转过去以后在新位置还能点中同一颗", () => {
+  const { layout } = shellLayout();
+  const { starmapStarAt } = loadClient().exports.__test;
+  const at0 = frameOut(layout, 0);
+  // 挑离自转轴最远的一颗：它转得最多，最能暴露「命中不跟着转」的 bug
+  let target = 0;
+  for (let i = 1; i < layout.sphere.length; i += 1) {
+    const cur = Math.hypot(layout.sphere[i].x, layout.sphere[i].z);
+    if (cur > Math.hypot(layout.sphere[target].x, layout.sphere[target].z)) target = i;
+  }
+  layout.screenPositions = at0;
+  const canvas = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 520, height: 300 }) };
+  const hit0 = starmapStarAt(layout, canvas, { clientX: at0[target].x, clientY: at0[target].y }, 520, 300);
+  assert.ok(hit0, "yaw=0 时应当点得中");
+  assert.equal(hit0.index, target, "点的就是那颗");
+
+  const at1 = frameOut(layout, 1.2);
+  layout.screenPositions = at1;
+  const moved = Math.hypot(at1[target].x - at0[target].x, at1[target].y - at0[target].y);
+  assert.ok(moved > 10, "这颗星确实被转走了：" + moved.toFixed(1) + "px");
+  const hit1 = starmapStarAt(layout, canvas, { clientX: at1[target].x, clientY: at1[target].y }, 520, 300);
+  assert.ok(hit1, "转到新位置后也要点得中");
+  assert.equal(hit1.index, target, "旋转后不能错位");
+  const stale = starmapStarAt(layout, canvas, { clientX: at0[target].x, clientY: at0[target].y }, 520, 300);
+  assert.ok(!stale || stale.index !== target, "旧位置不该再命中同一颗");
+});
+
 test("星图：createStarSprite 用离屏画布造贴图，没有 document 时返回 null", () => {
   const fakeCanvas = {
     width: 0,

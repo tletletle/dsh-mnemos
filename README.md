@@ -23,6 +23,12 @@ DSH 的本地长期记忆插件：把对话里值得留下的东西写成记录�
 - **仅单测验证的**：核心层、检索层、宿主接线层的逻辑与降级路径，以及浏览器半边的纯函数。
 - **仍然没验证的**：向量通道的真实推理（local 与 api 都没发过一次请求）；Windows 上的行为。
 
+## 致谢
+
+星图的三条大圆线框、边批量描边这两处做法，参考了
+[dsh-plugin-memory-neurons](https://github.com/LittleBlackTong/dsh-plugin-memory)（MIT License，
+Copyright (c) 2026 dsh-plugin-memory contributors）。代码是重写的，只借了思路；对应位置在本仓库里都留了注释。
+
 ## 安装
 
 ### 前置

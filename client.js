@@ -41,8 +41,12 @@ const STARMAP = {
   R_MIN: 2,
   R_MAX: 18,
   SHELL: 0.42, // 球壳外半径 = 画布短边 × 0.42
-  PITCH: -0.35, // 固定俯仰角：把球压出纵深
-  FOCUS_LEN: 4, // 透视焦距 = 球壳半径 × 4
+  PITCH: -0.18, // 固定俯仰角：没有它，yaw=0 时 XZ 大圆会退化成直线
+  ROLL: 0.22, // 固定小侧倾：没有它，yaw=0 时 YZ 大圆会退化成直线
+  FOCUS_LEN: 4, // 透视焦距 = 球壳半径 × 4（旧投影用，保留给球壳分层）
+  FOCAL_RATIO: 3, // 真三维路径的焦距 = 球壳半径 × 3
+  SPIN: 0.00006, // 自转角速度（rad/ms）
+  ASPECT_MAX: 1.6, // 屏幕横向最多拉开 1.6 倍，宽画布才不浪费
   ANCHOR_BASE: 40,
   ANCHOR_BONUS: 4, // 锚点星 40 + 4×权重 → 40~44
   CHAMPION: 1.6, // 每层权重最高的一颗（章首星）
@@ -1577,6 +1581,29 @@ function projectSphere(x, y, z, yaw, pitch, focusLen, w, hgt) {
 }
 
 /**
+ * 球面 -> 屏幕：绕 Y 轴转 yaw，再按焦距透视；横向乘画布宽高比，宽画布才不浪费。
+ * 思路参考 dsh-plugin-memory-neurons (MIT)。
+ */
+function projectStar(x, y, z, yaw, cx, cy, focal, aspect, camera) {
+  const cam = camera || STARMAP;
+  const c = Math.cos(yaw);
+  const s = Math.sin(yaw);
+  const rx = x * c + z * s;
+  const rz0 = -x * s + z * c;
+  const cp = Math.cos(cam.PITCH);
+  const sp = Math.sin(cam.PITCH);
+  const ry = y * cp - rz0 * sp;
+  const rz = y * sp + rz0 * cp;
+  const persp = focal / Math.max(1, focal + rz);
+  // 侧倾落在屏幕坐标上：只有俯仰的话，正对镜头的那条大圆会压成一条直线
+  const ox = rx * persp;
+  const oy = ry * persp;
+  const cr = Math.cos(cam.ROLL);
+  const sr = Math.sin(cam.ROLL);
+  return { x: cx + (ox * cr - oy * sr) * aspect, y: cy + ox * sr + oy * cr, z: rz, persp: persp };
+}
+
+/**
  * 立方根插值：半径按体积均匀铺开，不然点会全挤在球心附近。
  * 思路参考 dsh-xingxi (Yuuyuko-uu)。
  */
@@ -1656,17 +1683,25 @@ function layoutUniverse(stars, rawLinks, width, height) {
     if (best >= 0) champion.add(best);
   }
 
-  const rawX = [];
-  const rawY = [];
-  const meta = [];
+  // 球壳半径 = 短边 × SHELL，但绝不大到把最外层的星顶出画布。
+  // 1.06 是「焦距 = 3R 的透视下，球面上最高的一点能到屏幕 1.06R」的界。
+  const shellR = Math.min(Math.min(w, hgt) * STARMAP.SHELL, (hgt / 2 - STARMAP.PAD - 1) / 1.06);
+  const grow = shellR / shell;
+  const aspect = clampNum(w / hgt, 1, STARMAP.ASPECT_MAX);
+  const focal = shellR * STARMAP.FOCAL_RATIO;
+  const sphere = [];
+  const nodes = [];
   const depth = [];
   for (let i = 0; i < n; i += 1) {
     const star = list[i];
     const dir = starmapDirection(ids[i]);
-    const radius = i === anchor ? 0 : radiusOf[i];
-    const at = projectSphere(dir.x * radius, dir.y * radius, dir.z * radius, 0, STARMAP.PITCH, focusLen, w, hgt);
-    // far: 0 在最前，1 在最后。深度同时压 alpha 与半径
-    const far = clampNum((at.z / shell + 1) / 2, 0, 1);
+    const radius = i === anchor ? 0 : radiusOf[i] * grow;
+    const s3x = dir.x * radius;
+    const s3y = dir.y * radius;
+    const s3z = dir.z * radius;
+    const at = projectStar(s3x, s3y, s3z, 0, w / 2, hgt / 2, focal, aspect, STARMAP);
+    // far: 0 在最前，1 在最后——这里烘焙的是 yaw=0 的那一帧，供无 sphere 的平面回退用
+    const far = clampNum((at.z / shellR + 1) / 2, 0, 1);
     const keep = 1 - (1 - STARMAP.DEPTH_MIN) * far;
     let r;
     let alpha;
@@ -1675,23 +1710,26 @@ function layoutUniverse(stars, rawLinks, width, height) {
       alpha = 1;
     } else {
       const size = starRadius(star) * (champion.has(i) ? STARMAP.CHAMPION : 1);
-      // 下限 2.6：2.4 以下留给空位，绘制函数靠 r 与 sat 一眼分开两者
-      r = Math.round(clampNum(size * keep, 2.6, STARMAP.R_MAX) * 10) / 10;
+      // 半径不再烘深度：三维路径每帧按当帧的深度重算，烘死了转动时会过时。
+      // 下限 2.6：2.4 以下留给空位，绘制函数靠 r 与 sat 一眼分开两者。
+      r = Math.round(clampNum(size, 2.6, STARMAP.R_MAX) * 10) / 10;
       alpha = Math.round(clampNum(starAlpha(star.arousal) * keep, 0.17, 1) * 100) / 100;
     }
     // 同一种情绪的星不能长得一模一样：用 id 哈希把饱和度抖 ±10%。
     // 明度不抖——它已经被「深度 × 情绪」占满，再抖就把「远=暗」这条语义搅浑了。
     const jitter = ((hash32(ids[i] + ":sat") % 21) - 10) / 100;
-    rawX.push(w / 2 + (at.x - w / 2) * stretch);
-    rawY.push(at.y);
-    meta.push({
+    sphere.push({ x: Math.round(s3x * 10) / 10, y: Math.round(s3y * 10) / 10, z: Math.round(s3z * 10) / 10 });
+    nodes.push({
+      x: Math.round(at.x * 10) / 10,
+      y: Math.round(at.y * 10) / 10,
       r,
       hue: starHue(star.valence),
       sat: Math.round(clampNum(starSat(star.valence) * (1 + jitter), 0, 100)),
       alpha,
       phase: starPhase(ids[i]),
     });
-    depth.push(Math.round(at.z * 100) / 100);
+    // depth 与烘焙用的 far 必须同源（都是投影后的 z），否则两套深度会打架
+    depth.push(Math.round(at.z * 10) / 10);
   }
 
   // 空位：最外层球壳上的灰蓝小点，照旧不连线、不参与 stats
@@ -1700,49 +1738,35 @@ function layoutUniverse(stars, rawLinks, width, height) {
   for (let k = 0; k < extra.length; k += 1) {
     const item = extra[k];
     const dir = starmapDirection(item.id);
-    const dist = shell * (1.15 + 0.15 * ((hash32(item.id + ":shell") % 100) / 100));
-    const at = projectSphere(dir.x * dist, dir.y * dist, dir.z * dist, 0, STARMAP.PITCH, focusLen, w, hgt);
+    const dist = shellR * (1.15 + 0.15 * ((hash32(item.id + ":shell") % 100) / 100));
+    const s3x = dir.x * dist;
+    const s3y = dir.y * dist;
+    const s3z = dir.z * dist;
+    const at = projectStar(s3x, s3y, s3z, 0, w / 2, hgt / 2, focal, aspect, STARMAP);
     ids.push(item.id);
     unlitIds.push(item.id);
-    rawX.push(w / 2 + (at.x - w / 2) * stretch);
-    rawY.push(at.y);
-    meta.push({ r: item.r, hue: STARMAP.UNLIT_HUE, sat: item.sat, alpha: item.alpha, phase: item.phase });
-    depth.push(Math.round(at.z * 100) / 100);
-  }
-
-  // 撑满画布：按真实星的包围盒分轴缩放（围绕球心，锚点星不动）。
-  // 分轴是因为画布本来就宽：等比会被高度卡住，星空还是只占中间一条。
-  // 上界 2.4 免得寥寥几条记忆被放大成几颗巨球；下界 0.6。
-  let maxDx = 0;
-  let maxDy = 0;
-  for (let i = 0; i < n; i += 1) {
-    maxDx = Math.max(maxDx, Math.abs(rawX[i] - w / 2));
-    maxDy = Math.max(maxDy, Math.abs(rawY[i] - hgt / 2));
-  }
-  const fitX = clampNum(maxDx > 0 ? (w / 2 - STARMAP.PAD) / maxDx : 1, 0.6, 2.4);
-  const fitY = clampNum(maxDy > 0 ? (hgt / 2 - STARMAP.PAD) / maxDy : 1, 0.6, 2.4);
-  const nodes = [];
-  for (let i = 0; i < meta.length; i += 1) {
+    sphere.push({ x: Math.round(s3x * 10) / 10, y: Math.round(s3y * 10) / 10, z: Math.round(s3z * 10) / 10 });
     nodes.push({
-      x: Math.round((w / 2 + (rawX[i] - w / 2) * fitX) * 10) / 10,
-      y: Math.round((hgt / 2 + (rawY[i] - hgt / 2) * fitY) * 10) / 10,
-      r: meta[i].r,
-      hue: meta[i].hue,
-      sat: meta[i].sat,
-      alpha: meta[i].alpha,
-      phase: meta[i].phase,
+      x: Math.round(at.x * 10) / 10,
+      y: Math.round(at.y * 10) / 10,
+      r: item.r,
+      hue: STARMAP.UNLIT_HUE,
+      sat: item.sat,
+      alpha: item.alpha,
+      phase: item.phase,
     });
+    depth.push(Math.round(at.z * 10) / 10);
   }
-  return { nodes, ids, links, unlitIds, depth, anchor };
+  return { nodes, ids, links, unlitIds, depth, anchor, sphere, shell: { cx: w / 2, cy: hgt / 2, r: Math.round(shellR * 10) / 10 } };
 }
 
 /* @starmap-start */
 /**
- * 一帧星图：只认 ctx / nodes / opts，抽出去单放一块画布也能画。
- * opts = { time, links, width, height, sprite, focus }
- *   time   毫秒；0 是确定的静止图（视觉验收取这一帧）
- *   sprite 预渲染好的星点贴图；没有就回落到逐颗径向渐变
- *   focus  聚焦的真实星下标（hover），-1 表示没有
+ * 一帧星图：只认 ctx / nodes / opts。
+ * opts = { time, links, width, height, sprite, focus, sphere, shell, yaw, out }
+ *   给了 sphere + shell 走真三维：绕 Y 轴转 yaw、透视投影、按深度重算大小与亮度、远的先画；
+ *   没给就走原来的平面路径——抽出来单独放进画布靠的就是这条，行为不变。
+ *   out 给了就把本帧每颗星的屏幕坐标写回去（{x, y, r, alpha, depth}），命中测试跟着它走。
  */
 function drawStarmapFrame(ctx, nodes, opts) {
   const o = opts || {};
@@ -1753,7 +1777,12 @@ function drawStarmapFrame(ctx, nodes, opts) {
   const links = Array.isArray(o.links) ? o.links : [];
   const sprite = o.sprite && Number(o.sprite.width) > 0 ? o.sprite : null;
   const focus = Number.isFinite(Number(o.focus)) ? Math.round(Number(o.focus)) : -1;
+  const sphere = Array.isArray(o.sphere) && o.sphere.length === list.length ? o.sphere : null;
+  const shell = sphere && o.shell && Number(o.shell.r) > 0 ? o.shell : null;
+  const yaw = Number(o.yaw) || 0;
+  const out = Array.isArray(o.out) ? o.out : null;
   const turn = Math.PI * 2;
+  const count = list.length;
 
   const sky = ctx.createLinearGradient(0, 0, width, height);
   sky.addColorStop(0, "#2b2139");
@@ -1761,21 +1790,102 @@ function drawStarmapFrame(ctx, nodes, opts) {
   ctx.fillStyle = sky;
   ctx.fillRect(0, 0, width, height);
 
-  // 每颗星各飘各的：位移只有 2px 量级，构图不动，记住的那颗星一直在原处。
-  // 空位只飘一半，别让暗点抢注意力。相位来自节点自己的 phase，所以是确定的。
-  const px = [];
-  const py = [];
-  for (let i = 0; i < list.length; i += 1) {
-    const node = list[i] || {};
-    const phase = Number(node.phase) || 0;
-    const dark = (Number(node.r) || 0) <= 2.4 && (Number(node.sat) || 0) <= 16;
-    px.push((Number(node.x) || 0) + (dark ? 1.1 : 2.2) * Math.sin(time * 0.0007 + phase));
-    py.push((Number(node.y) || 0) + (dark ? 0.9 : 1.8) * Math.cos(time * 0.0009 + phase));
+  const px = new Array(count);
+  const py = new Array(count);
+  const pr = new Array(count);
+  const pa = new Array(count);
+  const pz = new Array(count);
+  let order = null;
+
+  if (shell) {
+    // ── 三条大圆：先把「中间确实是个球壳」立起来。纯装饰：不算边、不参与命中。
+    // 跟着 yaw 一起转，否则球壳和星点会对不上。思路参考 dsh-plugin-memory-neurons (MIT)
+    const focal = shell.r * 3;
+    const aspect = Math.min(1.6, Math.max(1, width / height));
+    const cosY = Math.cos(yaw);
+    const sinY = Math.sin(yaw);
+    // 固定的小俯仰 + 小侧倾（与布局同一组数：-0.18 / 0.22）。
+    // 少了它们，yaw=0 时正对镜头的两条大圆会压成直线，看着像十字线而不是球壳。
+    const cosP = Math.cos(-0.18);
+    const sinP = Math.sin(-0.18);
+    const cosR = Math.cos(0.22);
+    const sinR = Math.sin(0.22);
+    ctx.strokeStyle = "#ffb454";
+    ctx.globalAlpha = 0.16;
+    ctx.lineWidth = 0.9;
+    ctx.beginPath();
+    for (let plane = 0; plane < 3; plane += 1) {
+      for (let k = 0; k <= 96; k += 1) {
+        const a = (turn * k) / 96;
+        const co = Math.cos(a) * shell.r;
+        const si = Math.sin(a) * shell.r;
+        const wx = plane === 2 ? 0 : co;
+        const wy = plane === 0 ? si : plane === 1 ? 0 : co;
+        const wz = plane === 0 ? 0 : si;
+        const rx = wx * cosY + wz * sinY;
+        const rz0 = -wx * sinY + wz * cosY;
+        const ry = wy * cosP - rz0 * sinP;
+        const rz = wy * sinP + rz0 * cosP;
+        const persp = focal / Math.max(1, focal + rz);
+        const ox = rx * persp;
+        const oy = ry * persp;
+        const sx = shell.cx + (ox * cosR - oy * sinR) * aspect;
+        const sy = shell.cy + ox * sinR + oy * cosR;
+        if (k === 0) ctx.moveTo(sx, sy);
+        else ctx.lineTo(sx, sy);
+      }
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    // ── 投影每颗星：屏幕坐标与深度；半径、亮度按这一帧的深度现场重算
+    // （layout 里烘的那份只给平面回退用，转动时会过时）
+    order = [];
+    for (let i = 0; i < count; i += 1) {
+      const s3 = sphere[i] || {};
+      const x3 = Number(s3.x) || 0;
+      const y3 = Number(s3.y) || 0;
+      const z3 = Number(s3.z) || 0;
+      const rx = x3 * cosY + z3 * sinY;
+      const rz0 = -x3 * sinY + z3 * cosY;
+      const ry = y3 * cosP - rz0 * sinP;
+      const rz = y3 * sinP + rz0 * cosP;
+      const persp = focal / Math.max(1, focal + rz);
+      const ox = rx * persp;
+      const oy = ry * persp;
+      px[i] = shell.cx + (ox * cosR - oy * sinR) * aspect;
+      py[i] = shell.cy + ox * sinR + oy * cosR;
+      pz[i] = rz;
+      order.push(i);
+    }
+    // 画家算法：远的先画，近的盖上去
+    order.sort((a, b) => pz[b] - pz[a]);
+    for (let i = 0; i < count; i += 1) {
+      const node = list[i] || {};
+      const far = Math.min(1, Math.max(0, (pz[i] / Math.max(1, shell.r) + 1) / 2));
+      // 空位不吃深度那套：它本来就暗，只保留自己 0.20~0.30 的 alpha 与 1.2~2.2 的半径
+      const dark = (Number(node.r) || 0) <= 2.4 && (Number(node.sat) || 0) <= 16;
+      const baseR = Math.max(0.6, Number(node.r) || 1);
+      pr[i] = dark ? baseR : baseR * (1.15 - 0.4 * far); // 0.75~1.15
+      pa[i] = dark ? Math.min(1, Math.max(0.08, Number(node.alpha) || 0.55)) : 1 - 0.45 * far; // 0.55~1.0
+    }
+  } else {
+    // ── 平面回退：每颗星各飘各的（构图不动），空位只飘一半
+    for (let i = 0; i < count; i += 1) {
+      const node = list[i] || {};
+      const phase = Number(node.phase) || 0;
+      const dark = (Number(node.r) || 0) <= 2.4 && (Number(node.sat) || 0) <= 16;
+      px[i] = (Number(node.x) || 0) + (dark ? 1.1 : 2.2) * Math.sin(time * 0.0007 + phase);
+      py[i] = (Number(node.y) || 0) + (dark ? 0.9 : 1.8) * Math.cos(time * 0.0009 + phase);
+      pr[i] = Math.max(0.6, Number(node.r) || 1);
+      pa[i] = Math.min(1, Math.max(0.08, Number(node.alpha) || 0.55));
+      pz[i] = 0;
+    }
   }
 
   // 焦点：自己与相连的星保持亮度，其余压暗；空位不参与（本来就暗）
   let lit = null;
-  if (focus >= 0 && focus < list.length) {
+  if (focus >= 0 && focus < count) {
     lit = new Set();
     lit.add(focus);
     for (let k = 0; k < links.length; k += 1) {
@@ -1786,46 +1896,68 @@ function drawStarmapFrame(ctx, nodes, opts) {
     }
   }
 
-  // 暗线：透明度随距离平方衰减，有焦点时不相干的线更淡
+  // 边：按不透明度分三桶，每桶一次 beginPath + 多次 moveTo/lineTo + 一次 stroke。
+  // 不再逐边设样式再描——那是几千条边时真正贵的地方。聚焦那一组单独一批。
+  // 思路参考 dsh-plugin-memory-neurons (MIT)
   const reach = Math.max(90, Math.max(width, height) * 0.62);
-  ctx.lineWidth = 0.7;
+  const b0 = [];
+  const b1 = [];
+  const b2 = [];
+  const hot = [];
   for (let k = 0; k < links.length; k += 1) {
     const pair = links[k];
     if (!pair || pair.length < 2) continue;
     const a = pair[0];
     const b = pair[1];
-    if (!(a >= 0 && a < list.length && b >= 0 && b < list.length) || a === b) continue;
+    if (!(a >= 0 && a < count && b >= 0 && b < count) || a === b) continue;
     const dx = px[a] - px[b];
     const dy = py[a] - py[b];
     const fall = 1 - Math.sqrt(dx * dx + dy * dy) / reach;
     if (!(fall > 0)) continue;
-    const na = list[a] || {};
-    const nb = list[b] || {};
-    const bright = Math.min(1, Math.max(0, ((Number(na.alpha) || 0.55) + (Number(nb.alpha) || 0.55)) / 2));
-    let alpha = 0.2 * fall * fall * (0.45 + 0.55 * bright);
-    if (lit && !(lit.has(a) && lit.has(b))) alpha *= 0.35;
-    ctx.strokeStyle = "rgba(206,194,232," + alpha.toFixed(3) + ")";
+    const bright = Math.min(1, Math.max(0, (pa[a] + pa[b]) / 2));
+    const alpha = 0.2 * fall * fall * (0.45 + 0.55 * bright);
+    if (lit && lit.has(a) && lit.has(b)) hot.push(a, b);
+    else if (alpha > 0.1) b2.push(a, b);
+    else if (alpha > 0.05) b1.push(a, b);
+    else b0.push(a, b);
+  }
+  const batches = [
+    { seg: b0, alpha: 0.045 },
+    { seg: b1, alpha: 0.085 },
+    { seg: b2, alpha: 0.15 },
+  ];
+  if (hot.length) batches.push({ seg: hot, alpha: 0.26 });
+  ctx.lineWidth = 0.7;
+  for (let k = 0; k < batches.length; k += 1) {
+    const seg = batches[k].seg;
+    if (!seg.length) continue;
+    ctx.strokeStyle = "rgba(206,194,232," + batches[k].alpha + ")";
     ctx.beginPath();
-    ctx.moveTo(px[a], py[a]);
-    ctx.lineTo(px[b], py[b]);
+    for (let m = 0; m < seg.length; m += 2) {
+      ctx.moveTo(px[seg[m]], py[seg[m + 1]]);
+      ctx.lineTo(px[seg[m + 1]], py[seg[m + 1]]);
+    }
     ctx.stroke();
   }
 
-  for (let i = 0; i < list.length; i += 1) {
+  for (let seq = 0; seq < count; seq += 1) {
+    const i = order ? order[seq] : seq;
     const node = list[i] || {};
     const x = px[i];
     const y = py[i];
-    const r = Math.max(0.6, Number(node.r) || 1);
+    const r = Math.max(0.6, pr[i]);
     const hue = Number.isFinite(Number(node.hue)) ? Number(node.hue) : 190;
     const sat = Number.isFinite(Number(node.sat)) ? Number(node.sat) : 18;
-    const base = Math.min(1, Math.max(0.08, Number(node.alpha) || 0.55));
+    const base = Math.min(1, Math.max(0.08, pa[i]));
     const phase = Number(node.phase) || 0;
     // 空位：比真实星都小、几乎不发色的灰蓝点，不画白热核心（真实星 r 下限 2.6）
-    const dim = r <= 2.4 && sat <= 16;
+    const dim = (Number(node.r) || 0) <= 2.4 && sat <= 16;
     const alpha = dim || !lit || lit.has(i) ? base : base * 0.45;
     // 呼吸：半径 ±14%，空位只有一半，周期都拉到分钟级
     const breath = dim ? 0.93 + 0.07 * Math.sin(time * 0.0012 + phase) : 0.86 + 0.14 * Math.sin(time * 0.0012 + phase);
     const size = r * breath;
+    // out 里给的是不呼吸的半径：命中差不了几像素，但它是深度与大小的纯函数，能直接拿来断言
+    if (out) out[i] = { x: x, y: y, r: r, alpha: alpha, depth: pz[i] };
 
     if (dim) {
       ctx.fillStyle = "hsla(" + hue + "," + sat + "%,74%," + Math.min(1, alpha * 0.9).toFixed(3) + ")";
@@ -1916,17 +2048,22 @@ function formatStamp(at) {
   return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
 }
 
-/** 命中测试：指针换算成画布坐标，取最近的一颗（多给 7px 余量，小星也点得中）。 */
+/**
+ * 命中测试：指针换算成画布坐标，取最近的一颗（多给 7px 余量，小星也点得中）。
+ * 球壳在转，所以优先用最近一帧的屏幕坐标——否则点哪颗都错位。
+ */
 function starmapStarAt(layout, canvas, event, width, height) {
   const nodes = layout && layout.nodes ? layout.nodes : [];
   const rect = canvas && typeof canvas.getBoundingClientRect === "function" ? canvas.getBoundingClientRect() : null;
   if (!rect || !rect.width || !rect.height) return null;
   const x = ((Number(event && event.clientX) || 0) - rect.left) / rect.width * width;
   const y = ((Number(event && event.clientY) || 0) - rect.top) / rect.height * height;
+  const screen = layout && Array.isArray(layout.screenPositions) ? layout.screenPositions : null;
   let best = -1;
   let bestD = Infinity;
   for (let i = 0; i < nodes.length; i += 1) {
-    const node = nodes[i];
+    const node = screen && screen[i] ? screen[i] : nodes[i];
+    if (!node) continue;
     const d = Math.sqrt((node.x - x) * (node.x - x) + (node.y - y) * (node.y - y));
     if (d <= node.r + 7 && d < bestD) {
       bestD = d;
@@ -1936,11 +2073,15 @@ function starmapStarAt(layout, canvas, event, width, height) {
   return best < 0 ? null : { id: layout.ids[best], index: best };
 }
 
-/** 选中那颗星的位置：停帧时也要能画出高亮圈。 */
+/** 选中那颗星的位置：停帧时也要能画出高亮圈；球壳在转，所以取最近一帧的屏幕坐标。 */
 function starmapPickedNode(layout, id) {
   const ids = layout && layout.ids ? layout.ids : [];
   const at = ids.indexOf(String(id || ""));
-  return at >= 0 ? layout.nodes[at] : null;
+  if (at < 0) return null;
+  const node = layout.nodes[at];
+  const screen = layout && Array.isArray(layout.screenPositions) ? layout.screenPositions[at] : null;
+  if (!screen) return node;
+  return { x: screen.x, y: screen.y, r: screen.r, hue: node.hue, sat: node.sat };
 }
 
 /**
@@ -2379,6 +2520,9 @@ function register(ctx, React) {
         const layout = layoutUniverse(starmap.stars, starmap.links, width, height);
         // 贴图只造一次：每帧上千次 drawImage 比每次现建径向渐变便宜得多
         const sprite = createStarSprite(STARMAP.SPRITE);
+        // 每帧的屏幕坐标写回布局：命中测试与高亮圈都拿它，球壳转起来也不会点错
+        const screen = [];
+        layout.screenPositions = screen;
         let at = 0;
         const paint = (time) => {
           at = time;
@@ -2389,6 +2533,10 @@ function register(ctx, React) {
             height: height,
             sprite: sprite,
             focus: box.focus,
+            sphere: layout.sphere,
+            shell: layout.shell,
+            yaw: time * STARMAP.SPIN,
+            out: screen,
           });
           const ring = starmapPickedNode(layout, box.selected);
           if (!ring) return;
