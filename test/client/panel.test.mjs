@@ -2021,19 +2021,45 @@ test("星图：鲸从画外游到另一边，翻转与远近跟着抽签走", ()
   const near = whaleAtMoment(Object.assign({}, cyc, { scale: 1.15 }), 0.4, 520, 300);
   assert.ok(far.alpha < near.alpha, "远的更淡");
   assert.ok(near.alpha <= 0.55, "最近也才 0.55：" + near.alpha);
-  // 摆尾：幅度不超 0.28 rad，而且同一趟里确实在动
-  const w1 = whaleAtMoment(cyc, 0.07, 520, 300).wag;
-  const w2 = whaleAtMoment(cyc, 0.13, 520, 300).wag;
-  assert.ok(Math.abs(w1) <= 0.28 && Math.abs(w2) <= 0.28, "摆角要在 ±0.28 rad：" + w1 + " / " + w2);
-  assert.ok(Math.abs(w1 - w2) > 1e-6, "同一趟里两个进度取到的摆角必须不同：" + w1 + " vs " + w2);
+  // 三节的角度：幅度有上限，而且确实按相位差依次滞后
+  const sample = (p) => whaleAtMoment(cyc, p, 520, 300);
+  for (const p of [0.05, 0.22, 0.4, 0.55, 0.7, 0.9]) {
+    const f = sample(p);
+    const phase = (p * cyc.duration * Math.PI * 2) / 1100;
+    assert.ok(Math.abs(f.tilt) <= 0.06, "身体俯仰要 ≤0.06：" + f.tilt);
+    assert.ok(Math.abs(f.wag) <= 0.33, "尾叶摆角要 ≤0.33：" + f.wag);
+    // 两个角度分别由 phase / phase-1.70 推出（相位差真的存在）
+    assert.ok(Math.abs(f.tilt - -0.055 * Math.sin(phase)) < 2e-3, "俯仰要跟 phase 同相：" + f.tilt);
+    assert.ok(Math.abs(f.wag - 0.32 * Math.sin(phase - 1.7)) < 2e-3, "尾叶要滞后 1.70：" + f.wag);
+    assert.ok(Math.abs(f.trail - Math.sin(phase - 2.2) * 3) < 0.02, "尾迹要滞后 2.2：" + f.trail);
+  }
+  // bob 与尾叶同相：相位差半周期的两点，纵向偏移反号
+  const base = cyc.y * 300;
+  const pA = 0.1;
+  // 相位差半个周期 = π 弧度
+  const pB = pA + (Math.PI * 1100) / (2 * Math.PI * cyc.duration);
+  const offA = sample(pA).y - base;
+  const offB = sample(pB).y - base;
+  assert.ok(offA * offB < 0, "bob 要跟尾叶同相（半周期后反号）：" + offA + " / " + offB);
+
+  // 缓动：p 从 0 到 1 采样，横向进度严格递增且两端正好在画外
+  const eased = (p) => (sample(p).x + 0.25 * 520) / (1.5 * 520);
+  assert.ok(Math.abs(eased(0)) < 1e-9, "p=0 时应在起点：" + eased(0));
+  assert.ok(Math.abs(eased(1) - 1) < 1e-9, "p=1 时应在终点：" + eased(1));
+  let prev = -1;
+  for (let k = 0; k <= 100; k += 1) {
+    const v = eased(k / 100);
+    assert.ok(v > prev, "缓动必须严格递增（第 " + k + " 点：" + v + " <= " + prev + "）");
+    prev = v;
+  }
 });
 
 test("星图：没有 whale 就不画鲸，画了也只在星点之前", () => {
   const slice = starmapSlice();
-  const bodyArt = { width: 176, height: 74 };
-  const tailArt = { width: 53, height: 74 };
-  const whaleSprite = { body: bodyArt, tail: tailArt, pivot: { x: 42, y: 36 } };
-  const sprite = { width: 64, height: 64 };
+  const bodyArt = { width: 176, height: 137 };
+  const flukeArt = { width: 53, height: 47 };
+  const sprite = { body: bodyArt, fluke: flukeArt, pivot: { x: 123.2, y: 43.8 }, jointR: 8 };
+  const starSprite = { width: 64, height: 64 };
   const shoot = (extra) => {
     const calls = [];
     const ctx = {
@@ -2050,16 +2076,17 @@ test("星图：没有 whale 就不画鲸，画了也只在星点之前", () => {
       moveTo() {},
       lineTo() {},
       arc() {},
-      fill() {},
-      stroke() {},
+      fill() { calls.push("fill"); },
+      stroke() { calls.push("stroke"); },
       drawImage(img) {
-        if (img === bodyArt) calls.push("whale");
-        else if (img === tailArt) calls.push("tail");
+        if (img === bodyArt) calls.push("body");
+        else if (img === flukeArt) calls.push("fluke");
         else calls.push("star");
       },
       set fillStyle(v) {},
       set strokeStyle(v) {},
       set globalAlpha(v) {},
+      set globalCompositeOperation(v) { calls.push("op:" + v); },
       lineWidth: 1,
     };
     const nodes = [
@@ -2068,25 +2095,74 @@ test("星图：没有 whale 就不画鲸，画了也只在星点之前", () => {
     ];
     const sphere = [{ x: 40, y: 10, z: 30 }, { x: 10, y: 40, z: -20 }];
     const shell = { cx: 260, cy: 150, r: 118 };
-    const opts = Object.assign({ time: 0, links: [[0, 1]], width: 520, height: 300, sprite: sprite, sphere: sphere, shell: shell, focus: -1, whaleSprite: whaleSprite }, extra || {});
+    const opts = Object.assign({ time: 0, links: [[0, 1]], width: 520, height: 300, sprite: starSprite, sphere: sphere, shell: shell, focus: -1, whaleSprite: sprite }, extra || {});
     vm.runInNewContext(slice + ";drawStarmapFrame(ctx, nodes, opts);", { ctx, nodes, opts, Math, Set, Map });
     return calls;
   };
   const plain = shoot({ whale: null });
   const missing = shoot({});
-  const swimming = shoot({ whale: { x: 200, y: 120, scale: 1, alpha: 0.45, flip: false, wag: 0.2, tilt: 0.01 } });
-  assert.equal(plain.filter((c) => c === "whale").length, 0, "whale=null 时一颗鲸都不该画");
+  const swimming = shoot({ whale: { x: 200, y: 120, scale: 1, alpha: 0.45, flip: false, wag: 0.2, tilt: 0.01, trail: 1.2 } });
+  assert.equal(plain.filter((c) => c === "body").length, 0, "whale=null 时一颗鲸都不该画");
   assert.equal(missing.length, plain.length, "没给 whale 与给了 null 的落笔次数要一致");
 
-  const bodyAt = swimming.indexOf("whale");
-  const tailAt = swimming.indexOf("tail");
+  const bodyAt = swimming.indexOf("body");
+  const flukeAt = swimming.indexOf("fluke");
   const firstStar = swimming.indexOf("star");
   const rotatedAfterBody = swimming.findIndex((c, k) => c === "rotate" && k > bodyAt);
-  assert.ok(bodyAt >= 0 && bodyAt < firstStar, "鲸的身体必须在所有星点之前落笔（它在背景层）");
-  assert.ok(tailAt > bodyAt, "尾叶画在身体之后");
-  assert.ok(tailAt < firstStar, "尾叶也在星点之前");
-  assert.ok(rotatedAfterBody > bodyAt && rotatedAfterBody < firstStar, "尾叶的旋转在画完身体之后、星点之前");
+  assert.ok(bodyAt >= 0 && bodyAt < firstStar, "鲸的身体必须在所有星点之前落笔");
+  assert.ok(flukeAt > bodyAt, "尾叶画在身体之后");
+  assert.ok(flukeAt < firstStar, "尾叶也在星点之前");
+  assert.ok(rotatedAfterBody > bodyAt && rotatedAfterBody < flukeAt, "尾叶的旋转在身体与尾叶之间");
   assert.equal(swimming.filter((c) => c === "star").length, 2, "两颗真实星照旧各画一次");
+});
+test("星图：静止态两片在支点处接上，外轮廓是一条线", () => {
+  const slice = starmapSlice();
+  const bodyArt = { width: 176, height: 137 };
+  const flukeArt = { width: 53, height: 47 };
+  const pivot = { x: 123.2, y: 43.8 };
+  const sprite = { body: bodyArt, fluke: flukeArt, pivot: pivot, jointR: 8 };
+  const placed = {};
+  const stack = [{ x: 0, y: 0 }];
+  const ctx = {
+    createLinearGradient: () => ({ addColorStop() {} }),
+    createRadialGradient: () => ({ addColorStop() {} }),
+    fillRect() {},
+    save() { stack.push({ x: stack[stack.length - 1].x, y: stack[stack.length - 1].y }); },
+    restore() { stack.pop(); },
+    clip() {},
+    translate(dx, dy) {
+      const top = stack[stack.length - 1];
+      top.x += dx;
+      top.y += dy;
+    },
+    scale() {},
+    rotate() {},
+    beginPath() {},
+    moveTo() {},
+    lineTo() {},
+    arc() {},
+    fill() {},
+    stroke() {},
+    drawImage(img, dx, dy) {
+      const top = stack[stack.length - 1];
+      placed[img === bodyArt ? "body" : img === flukeArt ? "fluke" : "other"] = { x: top.x + dx, y: top.y + dy };
+    },
+    set fillStyle(v) {},
+    set strokeStyle(v) {},
+    set globalAlpha(v) {},
+    set globalCompositeOperation(v) {},
+    lineWidth: 1,
+  };
+  const nodes = [{ x: 40, y: 40, r: 1.5, hue: 218, sat: 11, alpha: 0.24, phase: 0 }];
+  const whale = { x: 260, y: 150, scale: 1, alpha: 0.45, flip: false, wag: 0, tilt: 0, trail: 0 };
+  const opts = { time: 0, links: [], width: 520, height: 300, whaleSprite: sprite, whale: whale };
+  vm.runInNewContext(slice + ";drawStarmapFrame(ctx, nodes, opts);", { ctx, nodes, opts, Math, Set, Map });
+  assert.ok(Number.isFinite(placed.body.x) && Number.isFinite(placed.fluke.x), "两片都要落笔：" + JSON.stringify(placed));
+  // 身体画布的 pivot 点、尾叶画布的槽心点，都要落在鲸的锚点 (whale.x, whale.y) 上
+  assert.ok(Math.abs(placed.body.x + pivot.x - whale.x) < 0.6, "身体的 pivot 要落在锚点：" + (placed.body.x + pivot.x));
+  assert.ok(Math.abs(placed.body.y + pivot.y - whale.y) < 0.6, "身体的 pivot 纵向对齐：" + (placed.body.y + pivot.y));
+  assert.ok(Math.abs(placed.fluke.x + 8 - whale.x) < 0.6, "尾叶的槽心要落在锚点：" + (placed.fluke.x + 8));
+  assert.ok(Math.abs(placed.fluke.y + (flukeArt.height - 8) - whale.y) < 0.6, "尾叶的槽心纵向对齐：" + (placed.fluke.y + flukeArt.height - 8));
 });
 test("星图：老形状（单个 canvas）也能画，不抛错且只落一笔", () => {
   const slice = starmapSlice();
@@ -2144,14 +2220,35 @@ test("星图：createWhaleSprite 造得出贴图，没有 document 时返回 nul
   });
   const withDoc = loadClient({ extra: { document: { baseURI: "http://127.0.0.1:52603/", createElement: makeCanvas } } });
   const whale = withDoc.exports.__test.createWhaleSprite();
-  assert.ok(whale && whale.body && whale.tail && whale.pivot, "要返回 {body, tail, pivot}");
-  assert.equal(whale.body.width, 176, "默认身体贴图宽 176");
-  assert.equal(whale.body.height, Math.round(176 * 0.42), "身长:身高 = 1:0.42");
-  assert.ok(whale.tail.width > 0 && whale.tail.height > 0, "尾叶是另一张画布");
-  assert.ok(whale.pivot.x > 0 && whale.pivot.x < whale.body.width, "支点 x 要在身体画布内：" + whale.pivot.x);
-  assert.ok(whale.pivot.y > 0 && whale.pivot.y < whale.body.height, "支点 y 也要在画布内：" + whale.pivot.y);
+  assert.ok(whale && whale.body && whale.fluke && whale.pivot, "要返回 {body, fluke, pivot}");
+  const ratio = whale.body.height / whale.body.width;
+  assert.ok(ratio >= 0.74 && ratio <= 0.82, "圆胖比例 1:0.78（±），实测 " + ratio.toFixed(3));
+  // 球铰跟着加厚的尾柄走：jointR ≈ 0.15h(≈21)，尾叶根部要比榫头更宽才盖得住
+  assert.ok(whale.jointR >= 17 && whale.jointR <= 23, "球铰半径 17~23：" + whale.jointR);
+  assert.ok(whale.fluke.width >= 2 * whale.jointR + 6, "尾叶根宽 ≥ 2×jointR+6：" + whale.fluke.width + " vs " + (2 * whale.jointR + 6));
+  // 尾叶画布不许超过 0.44w × 0.42h（压矮，别再把整只鲸顶高）
+  assert.ok(whale.fluke.width <= whale.body.width * 0.44, "fluke.width ≤0.44w：" + whale.fluke.width);
+  assert.ok(whale.fluke.height <= whale.body.height * 0.42, "fluke.height ≤0.42h：" + whale.fluke.height);
+  // 叶身中段厚度与叶尖圆角：路径常量，跟上面那条贝塞尔一一对应
+  assert.ok(whale.lobe && whale.lobe.midThickness >= whale.body.height * 0.13, "叶身中段 ≥0.13h：" + whale.lobe.midThickness);
+  assert.ok(whale.lobe.tipRadius >= 4, "叶尖圆角 ≥4px：" + whale.lobe.tipRadius);
+  assert.ok(whale.lobe.spread >= 60 && whale.lobe.spread <= 75, "两叶夹角 60°~75°：" + whale.lobe.spread);
+  // 尾柄是锥形不是细杆：根部 ≥0.38h、末端 0.26h~0.34h
+  assert.ok(whale.stem && whale.stem.rootH >= whale.body.height * 0.38, "尾柄根部 ≥0.38h：" + whale.stem.rootH);
+  assert.ok(whale.stem.tipH >= whale.body.height * 0.26 && whale.stem.tipH <= whale.body.height * 0.34, "尾柄末端 0.26h~0.34h：" + whale.stem.tipH);
+  // 支点落在尾柄末端
+  assert.ok(whale.pivot.x >= whale.body.width * 0.74 && whale.pivot.x <= whale.body.width * 0.82, "pivot.x 要在 0.74w~0.82w：" + whale.pivot.x);
+  assert.ok(whale.pivot.y >= whale.body.height * 0.18 && whale.pivot.y <= whale.body.height * 0.28, "pivot.y 要在 0.18h~0.28h：" + whale.pivot.y);
+  // 镂空几何：右端不越过 0.62w、下缘仍在身体下半、肉厚下限 3px、面积占比 20%~26%
+  // 面积比 = 新月面积 / body 剪影面积，用同一组控制点做多边形积分算得 0.226（3× 渲染目视与它一致：
+  // 镂空是一块横躺的微笑，四周仍有一圈薄肉，外轮廓整圈连续闭合、没有被啃断）
+  assert.ok(whale.cut && whale.cut.rightX <= whale.body.width * 0.62, "镂空右端 ≤0.62w：" + whale.cut.rightX);
+  assert.ok(whale.cut.bottomY >= whale.body.height * 0.52, "镂空下缘 ≥0.52h：" + whale.cut.bottomY);
+  assert.ok(whale.cut.minMeat >= 3, "肉厚下限 ≥3px：" + whale.cut.minMeat);
+  assert.ok(whale.cut.areaRatio >= 0.2 && whale.cut.areaRatio <= 0.26, "镂空占比 20%~26%：" + whale.cut.areaRatio);
+  assert.ok(whale.fluke.width > 10 && whale.fluke.height > 10, "尾叶是单独一张画布");
   const bigger = withDoc.exports.__test.createWhaleSprite(220);
-  assert.equal(bigger.body.width, 220);
+  assert.ok(bigger.body.width === 220 && Math.abs(bigger.body.height / bigger.body.width - 0.78) < 0.02, "放大后比例不变");
   assert.equal(loadClient().exports.__test.createWhaleSprite(), null, "没有 document 就返回 null，不抛");
 });
 

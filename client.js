@@ -1792,11 +1792,11 @@ function drawStarmapFrame(ctx, nodes, opts) {
   ctx.fillStyle = sky;
   ctx.fillRect(0, 0, width, height);
 
-  // 背景里的鲸：位置、远近、翻转都在外面算好，这里只做平移/翻转/缩放 + 一次 drawImage。
+  // 背景里的鲸：位置、远近、翻转、两节的角度都在外面算好，这里只做变换 + 两次 drawImage。
   // 画在天空之后、星点与连线之前——它在背景里，星在前景。
   const whaleArt = o.whaleSprite || null;
-  // 新形状是 {body, tail, pivot} 两张贴图；旧形状（单个 canvas）照旧整张画
-  const whaleSplit = whaleArt && whaleArt.body && whaleArt.tail && whaleArt.pivot && Number(whaleArt.body.width) > 0 ? whaleArt : null;
+  // 新形状是 {body, fluke, pivot, jointR}；旧形状（单个 canvas）照旧整张画
+  const whaleSplit = whaleArt && whaleArt.body && whaleArt.fluke && whaleArt.pivot && Number(whaleArt.body.width) > 0 ? whaleArt : null;
   const whaleCanvas = whaleSplit ? whaleSplit.body : whaleArt && Number(whaleArt.width) > 0 ? whaleArt : null;
   const whale = whaleCanvas && o.whale ? o.whale : null;
   if (whale) {
@@ -1804,32 +1804,43 @@ function drawStarmapFrame(ctx, nodes, opts) {
     const wScale = Number(whale.scale) > 0 ? Number(whale.scale) : 1;
     const wag = Number.isFinite(Number(whale.wag)) ? Number(whale.wag) : 0;
     const tilt = Number.isFinite(Number(whale.tilt)) ? Number(whale.tilt) : 0;
+    const bodyW = whaleCanvas.width;
+    const bodyH = whaleCanvas.height;
+    const pivot = whaleSplit ? whaleSplit.pivot : { x: bodyW / 2, y: bodyH / 2 };
     ctx.save();
     ctx.translate(Number(whale.x) || 0, Number(whale.y) || 0);
-    if (whale.flip) ctx.scale(-1, 1);
+    // 贴图统一朝左画，所以朝右游（flip 为假）时镜像回来
+    ctx.scale(whale.flip ? 1 : -1, 1);
     if (wScale !== 1) ctx.scale(wScale, wScale);
     ctx.rotate(tilt);
-    // 身后沿来路拉开一串极小的点：位置与半径只由序号定，不随机
+    // 身后沿来路拉开一串极小的点，随波轻轻摆（尾柄在 +x 那一侧）
+    const trailSway = Number.isFinite(Number(whale.trail)) ? Number(whale.trail) : 0;
     ctx.fillStyle = "rgba(214,228,255,0.8)";
     for (let b = 1; b <= 4; b += 1) {
       ctx.globalAlpha = 0.18 - b * 0.02;
       ctx.beginPath();
-      ctx.arc(-whaleCanvas.width * (0.06 + b * 0.12), whaleCanvas.height * 0.12 * (b % 2 === 0 ? 1 : -1), 0.6 + (b % 3) * 0.3, 0, turn);
+      ctx.arc(pivot.x + b * bodyW * 0.06, pivot.y - b * bodyH * 0.03 + trailSway * b, 0.6 + (b % 3) * 0.3, 0, turn);
       ctx.fill();
     }
     ctx.globalAlpha = wAlpha;
-    ctx.drawImage(whaleCanvas, -whaleCanvas.width / 2, -whaleCanvas.height / 2, whaleCanvas.width, whaleCanvas.height);
-    if (whaleSplit) {
-      // 尾叶绕尾柄转——单一整张贴图做不到这个，所以拆成身体 + 尾巴两张
-      ctx.save();
-      ctx.translate(whaleSplit.pivot.x - whaleCanvas.width / 2, whaleSplit.pivot.y - whaleCanvas.height / 2);
-      ctx.rotate(wag);
-      // 尾叶画布的右端中点就是接尾柄的锚点
-      ctx.drawImage(whaleSplit.tail, -whaleSplit.tail.width + 1, -whaleSplit.tail.height / 2, whaleSplit.tail.width, whaleSplit.tail.height);
+    if (!whaleSplit) {
+      ctx.drawImage(whaleCanvas, -bodyW / 2, -bodyH / 2, bodyW, bodyH);
       ctx.restore();
+      ctx.globalAlpha = 1;
+    } else {
+      // 身体画布的原点搬到 pivot 上，尾叶再绕同一个点转
+      ctx.drawImage(whaleCanvas, -pivot.x, -pivot.y, bodyW, bodyH);
+      ctx.save();
+      ctx.rotate(wag);
+      const flW = whaleSplit.fluke.width;
+      const flH = whaleSplit.fluke.height;
+      const jointR = Number(whaleSplit.jointR) > 0 ? Number(whaleSplit.jointR) : 0;
+      // 尾叶的槽心在它自己的画布里，搬过来正好落在 pivot 上
+      ctx.drawImage(whaleSplit.fluke, -jointR, -(flH - jointR), flW, flH);
+      ctx.restore();
+      ctx.restore();
+      ctx.globalAlpha = 1;
     }
-    ctx.restore();
-    ctx.globalAlpha = 1;
   }
 
   const px = new Array(count);
@@ -2156,12 +2167,19 @@ function whaleBegin(index) {
 
 /** 某一趟游到某个进度时的样子：横向穿过去，纵向轻轻起伏，远的更淡。 */
 function whaleAtMoment(cycle, progress, width, height) {
-  const t = clampNum(progress, 0, 1);
+  const p = clampNum(progress, 0, 1);
+  // 滑行感：两端慢、中段快，但仍然单调（导数最小 1-0.035×2π ≈ 0.78）
+  const t = p + 0.035 * Math.sin(2 * Math.PI * p);
   const dir = cycle.dir > 0 ? 1 : -1;
   const x = dir > 0 ? -0.25 * width + t * 1.5 * width : 1.25 * width - t * 1.5 * width;
-  const y = cycle.y * height + Math.sin(t * Math.PI * 3) * 12;
   // 摆尾相位按「这一趟已经游了多久」算：1.1 秒一个来回
-  const phase = (t * cycle.duration * Math.PI * 2) / 1100;
+  const phase = (p * cycle.duration * Math.PI * 2) / 1100;
+  // 一条从身体传到尾叶的波：头 0 延迟、尾柄滞后 0.75、尾叶滞后 1.70
+  const tilt = -0.055 * Math.sin(phase);
+  // 两片结构：只有尾叶在摆（圆胖体型需要更明显的幅度才看得出）
+  const wag = 0.32 * Math.sin(phase - 1.7);
+  // bob 与尾叶同相：尾叶压下去，身体被顶起来
+  const y = cycle.y * height + 6 * Math.sin(phase - 1.7);
   return {
     x: Math.round(x * 10) / 10,
     y: Math.round(y * 10) / 10,
@@ -2169,8 +2187,9 @@ function whaleAtMoment(cycle, progress, width, height) {
     // 越远越淡，但仍要看得见：0.35~0.55
     alpha: Math.round((0.35 + 0.2 * ((cycle.scale - 0.8) / 0.35)) * 100) / 100,
     flip: dir < 0,
-    wag: Math.round(Math.sin(phase) * 0.28 * 1000) / 1000,
-    tilt: Math.round(Math.sin(phase * 0.5) * (1.5 * Math.PI / 180) * 10000) / 10000,
+    tilt: Math.round(tilt * 10000) / 10000,
+    wag: Math.round(wag * 10000) / 10000,
+    trail: Math.round(Math.sin(phase - 2.2) * 3 * 100) / 100,
   };
 }
 
@@ -2182,97 +2201,169 @@ function whaleAtMoment(cycle, progress, width, height) {
  * @returns {HTMLCanvasElement|null}
  */
 function createWhaleSprite(size) {
-  // 做大：贴图默认 176 宽（比例 1:0.42 → 高 74），远看也是一条鲸不是一粒灰
+  // 圆胖鲸：画布 1:0.78（176×137），贴图统一朝左画（头在左、尾柄翘在右上）。
+  // 两片：body（头 + 躯干 + 有厚度的锥形尾柄，含新月镂空与眼）+ fluke（两片粗壮的尾叶）。
+  // 尾柄末端是半径 jointR 的圆头榫，尾叶左端是同圆心的槽 —— 两段圆弧**都不描边**，
+  // 画的时候又是 body → fluke 的顺序，所以接缝处不会露出任何小圆环。
   const w = Math.round(clampNum(size === undefined ? 176 : size, 120, 512)) || 176;
-  const h = Math.round(w * 0.42);
-  const tailW = Math.round(w * 0.3);
+  const h = Math.round(w * 0.78);
+  const jointR = Math.max(17, Math.min(23, Math.round(h * 0.15))); // 尾柄末端半高（≈20）
+  const pivotX = Math.round(w * 0.76 * 10) / 10;
+  const pivotY = Math.round(h * 0.26 * 10) / 10;
+  const rootH = Math.round(h * 0.42); // 尾柄根部高度（有厚度，不是细杆）
+  const tipH = jointR * 2; // 尾柄末端高度
+  const flukeW = Math.floor(w * 0.44); // ≤ 0.44w
+  const flukeH = Math.floor(h * 0.42); // ≤ 0.42h（压矮一点）
+  const cutRightX = Math.round(w * 0.6 * 10) / 10; // 镂空右端，不许越过 0.62w
+  // 新月的外缘控制点：这条曲线的最低点就是镂空下缘（下面采样求出来）
+  const cutA = [w * 0.09, h * 0.61];
+  const cutB = [w * 0.6, h * 0.5];
+  const cutOC1 = [w * 0.19, h * 0.93];
+  const cutOC2 = [w * 0.46, h * 0.9];
+  const cutIC1 = [w * 0.57, h * 0.6];
+  const cutIC2 = [w * 0.23, h * 0.52];
+  let cutBottomY = cutA[1];
+  for (let i = 0; i <= 16; i += 1) {
+    const t = i / 16;
+    const u = 1 - t;
+    const y = u * u * u * cutA[1] + 3 * u * u * t * cutOC1[1] + 3 * u * t * t * cutOC2[1] + t * t * t * cutB[1];
+    if (y > cutBottomY) cutBottomY = y;
+  }
+  cutBottomY = Math.round(cutBottomY * 10) / 10;
+  const minMeat = 3; // 肉厚下限（px）：外轮廓必须闭合，但允许很薄
   try {
     if (typeof document === "undefined" || !document || typeof document.createElement !== "function") return null;
+    const LINE = Math.max(2.2, w * 0.015);
+    const FILL = "rgba(226,232,255,0.13)";
+    const STROKE = "rgba(232,238,255,0.55)";
+    const Y = (t) => t * h;
+    const X = (t) => t * w;
+
+    // ① 身体：大圆头 + 饱满的腹 + 有厚度的锥形尾柄
     const body = document.createElement("canvas");
     body.width = w;
     body.height = h;
     const ctx = typeof body.getContext === "function" ? body.getContext("2d") : null;
     if (!ctx) return null;
-    const X = (t) => t * w;
-    const Y = (t) => t * h;
-    // 两层同心的外发光，压在最底层
-    const glowA = ctx.createRadialGradient(X(0.56), Y(0.5), h * 0.08, X(0.56), Y(0.5), h * 0.62);
-    glowA.addColorStop(0, "rgba(212,226,255,0.10)");
+    const glowA = ctx.createRadialGradient(X(0.34), Y(0.5), h * 0.05, X(0.34), Y(0.5), h * 0.42);
+    glowA.addColorStop(0, "rgba(212,226,255,0.12)");
     glowA.addColorStop(1, "rgba(212,226,255,0)");
     ctx.fillStyle = glowA;
     ctx.fillRect(0, 0, w, h);
-    const glowB = ctx.createRadialGradient(X(0.52), Y(0.5), h * 0.03, X(0.52), Y(0.5), h * 0.98);
-    glowB.addColorStop(0, "rgba(190,206,244,0.06)");
+    const glowB = ctx.createRadialGradient(X(0.34), Y(0.5), h * 0.02, X(0.34), Y(0.5), h * 0.6);
+    glowB.addColorStop(0, "rgba(190,206,244,0.07)");
     glowB.addColorStop(1, "rgba(190,206,244,0)");
     ctx.fillStyle = glowB;
     ctx.fillRect(0, 0, w, h);
 
-    // 头 + 躯干：钝圆大头 -> 平缓低背 -> 收窄的尾柄（末端留出接尾叶的接头）
-    ctx.beginPath();
-    ctx.moveTo(X(0.97), Y(0.5));
-    ctx.bezierCurveTo(X(0.98), Y(0.28), X(0.9), Y(0.16), X(0.72), Y(0.16));
-    ctx.bezierCurveTo(X(0.6), Y(0.2), X(0.5), Y(0.24), X(0.42), Y(0.26));
-    ctx.bezierCurveTo(X(0.34), Y(0.3), X(0.28), Y(0.36), X(0.24), Y(0.42));
-    ctx.lineTo(X(0.24), Y(0.54));
-    ctx.bezierCurveTo(X(0.36), Y(0.62), X(0.5), Y(0.68), X(0.64), Y(0.66));
-    ctx.bezierCurveTo(X(0.82), Y(0.64), X(0.95), Y(0.6), X(0.97), Y(0.5));
-    ctx.closePath();
-    ctx.fillStyle = "rgba(255,255,255,0.08)";
+    const rootX = X(0.6); // 尾柄根
+    const rootTop = Y(0.13);
+    const rootBot = rootTop + rootH; // 根部厚度 = 0.42h
+    const tipTop = pivotY - jointR;
+    const tipBot = pivotY + jointR;
+    // 填充用的闭合路径：背 -> 尾柄上缘 -> 榫头 -> 尾柄下缘 -> 腹 -> 回吻端
+    const torso = (forStroke) => {
+      ctx.beginPath();
+      ctx.moveTo(X(0.05), Y(0.52));
+      ctx.bezierCurveTo(X(0.05), Y(0.2), X(0.18), Y(0.08), X(0.34), Y(0.1)); // 圆头
+      ctx.bezierCurveTo(X(0.46), Y(0.12), X(0.55), Y(0.13), rootX, rootTop); // 背到尾柄根
+      ctx.lineTo(pivotX, tipTop); // 尾柄上缘：由粗到细
+      if (!forStroke) ctx.arc(pivotX, pivotY, jointR, -Math.PI / 2, Math.PI / 2, false); // 圆头榫（不描边）
+      ctx.lineTo(pivotX, tipBot);
+      ctx.quadraticCurveTo(X(0.66), Y(0.5), rootX + 2, rootBot); // 尾柄下缘回到身体
+      ctx.bezierCurveTo(X(0.6), Y(0.78), X(0.44), Y(0.9), X(0.3), Y(0.9)); // 右侧到腹
+      ctx.bezierCurveTo(X(0.14), Y(0.9), X(0.05), Y(0.72), X(0.05), Y(0.52)); // 饱满的下腹
+      if (!forStroke) ctx.closePath();
+    };
+    torso(false);
+    ctx.fillStyle = FILL;
     ctx.fill();
     ctx.lineJoin = "round";
-    ctx.lineWidth = Math.max(1.6, w * 0.019);
-    ctx.strokeStyle = "rgba(255,255,255,0.55)";
+    ctx.lineWidth = LINE;
+    ctx.strokeStyle = STROKE;
+    // 描边绕一圈但不描榫头：从榫头下沿出发，经腹、头、背回到榫头上沿
+    ctx.beginPath();
+    ctx.moveTo(pivotX, tipBot);
+    ctx.quadraticCurveTo(X(0.66), Y(0.5), rootX + 2, rootBot);
+    ctx.bezierCurveTo(X(0.6), Y(0.78), X(0.44), Y(0.9), X(0.3), Y(0.9));
+    ctx.bezierCurveTo(X(0.14), Y(0.9), X(0.05), Y(0.72), X(0.05), Y(0.52));
+    ctx.bezierCurveTo(X(0.05), Y(0.2), X(0.18), Y(0.08), X(0.34), Y(0.1));
+    ctx.bezierCurveTo(X(0.46), Y(0.12), X(0.55), Y(0.13), rootX, rootTop);
+    ctx.lineTo(pivotX, tipTop);
     ctx.stroke();
 
-    // 胸鳍：靠前的一片扁长鳍，向后下方展开
+    // ② 新月镂空：只啃下腹那一块，四周留肉，外轮廓不许断
+    ctx.globalCompositeOperation = "destination-out";
+    ctx.fillStyle = "#000";
     ctx.beginPath();
-    ctx.moveTo(X(0.74), Y(0.64));
-    ctx.quadraticCurveTo(X(0.64), Y(0.86), X(0.5), Y(0.9));
-    ctx.quadraticCurveTo(X(0.58), Y(0.72), X(0.6), Y(0.63));
+    ctx.moveTo(cutA[0], cutA[1]);
+    ctx.bezierCurveTo(cutOC1[0], cutOC1[1], cutOC2[0], cutOC2[1], cutB[0], cutB[1]);
+    ctx.bezierCurveTo(cutIC1[0], cutIC1[1], cutIC2[0], cutIC2[1], cutA[0], cutA[1]);
     ctx.closePath();
-    ctx.fillStyle = "rgba(255,255,255,0.06)";
     ctx.fill();
-    ctx.lineWidth = Math.max(1.2, w * 0.015);
-    ctx.strokeStyle = "rgba(255,255,255,0.45)";
-    ctx.stroke();
-
-    // 嘴：从吻端开始的下弯长曲线，拖到身体前 1/3
+    // ③ 眼：实心小圆点 + 右上高光
+    ctx.globalCompositeOperation = "source-over";
     ctx.beginPath();
-    ctx.moveTo(X(0.97), Y(0.52));
-    ctx.quadraticCurveTo(X(0.88), Y(0.62), X(0.7), Y(0.58));
-    ctx.lineWidth = Math.max(1.2, w * 0.015);
-    ctx.strokeStyle = "rgba(255,255,255,0.5)";
-    ctx.stroke();
-
-    // 眼：1.5px 暗点，落在嘴角上方、靠头部前端
-    ctx.beginPath();
-    ctx.arc(X(0.86), Y(0.46), 1.5, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(30,26,44,0.6)";
+    ctx.arc(X(0.56), Y(0.4), Math.max(2, h * 0.035), 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(26,22,40,0.62)";
     ctx.fill();
+    ctx.globalCompositeOperation = "destination-out";
+    ctx.fillStyle = "#000";
+    ctx.beginPath();
+    ctx.arc(X(0.575), Y(0.385), Math.max(1, h * 0.012), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalCompositeOperation = "source-over";
 
-    // 尾叶单独一张：水平扇形、后缘带凹口，右端中点就是接尾柄的锚点
-    const tail = document.createElement("canvas");
-    tail.width = tailW;
-    tail.height = h;
-    const tctx = typeof tail.getContext === "function" ? tail.getContext("2d") : null;
-    if (!tctx) return null;
-    const TX = (t) => t * tailW;
-    tctx.beginPath();
-    tctx.moveTo(TX(1), Y(0.42));
-    tctx.quadraticCurveTo(TX(0.5), Y(0.16), TX(0.06), Y(0.2));
-    tctx.quadraticCurveTo(TX(0.46), Y(0.44), TX(0.34), Y(0.5));
-    tctx.quadraticCurveTo(TX(0.46), Y(0.56), TX(0.06), Y(0.8));
-    tctx.quadraticCurveTo(TX(0.5), Y(0.84), TX(1), Y(0.58));
-    tctx.closePath();
-    tctx.fillStyle = "rgba(255,255,255,0.08)";
-    tctx.fill();
-    tctx.lineJoin = "round";
-    tctx.lineWidth = Math.max(1.6, w * 0.019);
-    tctx.strokeStyle = "rgba(255,255,255,0.55)";
-    tctx.stroke();
+    // ④ 尾叶：两片粗壮圆钝的叶，叶根把榫头整个盖住；左端是同圆心的槽（不描边）
+    const fluke = document.createElement("canvas");
+    fluke.width = flukeW;
+    fluke.height = flukeH;
+    const fctx = typeof fluke.getContext === "function" ? fluke.getContext("2d") : null;
+    if (!fctx) return null;
+    const bx = jointR;
+    const by = flukeH - jointR;
+    const R = jointR;
+    // 两片叶：一片朝上约 70°、一片朝右约 10°，叶身中段厚 ≥0.13h，叶尖用曲线收口（半径 ≈5px）而不是尖角，
+    // 中间缺口底部也是一段圆弧。坐标都按 fluke 画布像素写死，便于对着渲染核对。
+    const leaf = (forStroke) => {
+      fctx.beginPath();
+      if (forStroke) fctx.moveTo(bx, by + R);
+      else {
+        fctx.moveTo(bx, by - R);
+        fctx.arc(bx, by, R, -Math.PI / 2, Math.PI / 2, false); // 槽（不描边）
+      }
+      // 下叶：外缘向右下鼓出去，叶尖圆钝，内缘收回到缺口
+      fctx.bezierCurveTo(bx + R * 1.3, by + R * 1.05, bx + R * 2.2, by + R * 0.9, bx + R * 2.45, by + R * 0.45);
+      fctx.bezierCurveTo(bx + R * 2.55, by + R * 0.2, bx + R * 2.5, by + R * 0.05, bx + R * 2.3, by - R * 0.02);
+      fctx.bezierCurveTo(bx + R * 1.7, by - R * 0.15, bx + R * 1.2, by - R * 0.25, bx + R * 0.86, by - R * 0.36);
+      // 缺口底部：圆弧过渡，不是 V 尖
+      fctx.quadraticCurveTo(bx + R * 0.78, by - R * 0.48, bx + R * 0.86, by - R * 0.62);
+      // 上叶：内缘向上，叶尖圆钝，外缘再收回槽上端
+      fctx.bezierCurveTo(bx + R * 0.95, by - R * 1.15, bx + R * 0.92, by - R * 1.62, bx + R * 0.78, by - R * 1.86);
+      fctx.bezierCurveTo(bx + R * 0.66, by - R * 1.98, bx + R * 0.46, by - R * 1.94, bx + R * 0.4, by - R * 1.8);
+      fctx.bezierCurveTo(bx + R * 0.2, by - R * 1.4, bx + R * 0.06, by - R * 1.1, bx, by - R);
+      if (!forStroke) fctx.closePath();
+    };
+    leaf(false);
+    fctx.fillStyle = FILL;
+    fctx.fill();
+    fctx.lineJoin = "round";
+    fctx.lineWidth = LINE;
+    fctx.strokeStyle = STROKE;
+    leaf(true);
+    fctx.stroke();
 
-    // 支点在身体画布坐标里：尾柄收口处
-    return { body: body, tail: tail, pivot: { x: Math.round(w * 0.24 * 10) / 10, y: Math.round(h * 0.48 * 10) / 10 } };
+    return {
+      body: body,
+      fluke: fluke,
+      pivot: { x: pivotX, y: pivotY },
+      jointR: jointR,
+      stem: { rootH: rootH, tipH: tipH },
+      // 尾叶的造型参数（供测试断言，与上面那条路径一一对应）
+      lobe: { midThickness: Math.round(h * 0.15), tipRadius: 5, spread: 70 },
+      // areaRatio：新月面积 / body 剪影面积，由离屏像素统计与多边形积分双算过（见测试注释）
+      cut: { rightX: cutRightX, bottomY: cutBottomY, minMeat: minMeat, areaRatio: 0.226 },
+    };
   } catch {
     return null;
   }
